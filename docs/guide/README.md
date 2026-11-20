@@ -11,6 +11,26 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | 3 | [03-eks.md](03-eks.md) | `modules/eks` — EKS 1.37, core 노드그룹 2대 |
 | 4 | [04-smoke-app.md](04-smoke-app.md) | `k8s/smoke/` — nginx Deployment/Service, probe·resources 실험 |
 | 5 | [05-lbc-gateway.md](05-lbc-gateway.md) | AWS LB Controller + Gateway API → 인터넷에서 ALB로 접속 |
+| 6 | [06-ecr.md](06-ecr.md) | `modules/ecr` — 레포 3개, 이미지 빌드·푸시 |
+| 7 | [07-data.md](07-data.md) | `modules/rds`, `modules/elasticache`, Strimzi Kafka, `app_rw` |
+| 8 | [08-external-secrets.md](08-external-secrets.md) | Secrets Manager → ESO → K8s Secret (DB, JWT 키) |
+| 9 | [09-point-app.md](09-point-app.md) | `k8s/apps` Kustomize, HTTPRoute 3분기, 데모 시나리오 |
+| 10 | [10-karpenter-keda.md](10-karpenter-keda.md) | Spot NodePool, ScaledObject, 부하 테스트·확장 시간 측정 |
+| 11 | [11-argocd.md](11-argocd.md) | Terraform 으로 ArgoCD + root, App of Apps, 수동 설치분 이전 |
+| 12 | [12-observability.md](12-observability.md) | kube-prometheus-stack + ServiceMonitor (또는 Container Insights) |
+
+> **0~5단계**는 실제로 진행한 결과를 반영했고, **6~12단계**는 진행 전에 미리 쓴 가이드다.
+> 6~12 문서의 "⚠️ 확인" 표시는 버전·필드명 등 진행 시점에 검증해야 하는 부분 → 실습하면서 고쳐 둘 것.
+>
+> 특히 **9단계부터는 ROADMAP 과 다르다**: point-backend 가 `X-User-Id` 헤더 대신 JWT 인증으로 바뀌었고,
+> 데모 계정·이벤트는 `local` 프로필에서만 생긴다 → [09 문서 상단](09-point-app.md#️-roadmap-과-달라진-점-point-backend-현재-코드-기준) 참고.
+
+## 다음에 다시 시작할 때 (오늘 전부 정리한 상태에서)
+1. `bootstrap/` `terraform apply` (state 버킷 — 같은 이름으로 재생성)
+2. `envs/dev/` `terraform init` → `terraform apply` (VPC + EKS + LBC IAM, ≈ 20분)
+3. `aws eks update-kubeconfig --name point-dev-eks --region ap-northeast-2`
+4. 5단계: CRD 설치 → `values.yaml` 의 **vpcId 갱신** → Helm 설치 → `kubectl apply -f k8s/smoke/`
+5. 내 공인 IP 가 바뀌었으면 `terraform.tfvars` 의 `my_ip_cidr` 와 `30-gateway.yaml` 의 `sourceRanges` 수정
 
 ## 이 실습에서 고정한 버전 (2026-11-20 기준)
 
