@@ -1,0 +1,16 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+!*.tfvars.example
+*.tfplan
+tfplan
+
+# Kubernetes
+kubeconfig*
+
+# 기타
+.env
+.DS_Store
