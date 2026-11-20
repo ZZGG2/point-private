@@ -1,0 +1,6 @@
+clusterName: point-dev-eks
+region: ap-northeast-2
+vpcId: vpc-08fbd37da787fc400
+serviceAccount:
+  create: true
+  name: aws-load-balancer-controller   # ← 5-1 association 의 이름과 정확히 일치해야 함

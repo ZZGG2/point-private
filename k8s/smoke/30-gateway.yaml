@@ -1,0 +1,64 @@
+# ① ALB 설정: 인터넷 공개 + 내 IP만 허용 (scheme 기본값은 internal)
+apiVersion: gateway.k8s.aws/v1
+kind: LoadBalancerConfiguration
+metadata:
+  name: smoke-alb
+  namespace: smoke
+spec:
+  scheme: internet-facing
+  sourceRanges:
+    - "183.98.203.186/32"   # 내 공인 IP (바뀌면 수정 후 apply)
+---
+# ② 타겟 그룹: ip 타입 (기본값 instance 는 NodePort Service 필요 → 우리는 ClusterIP)
+apiVersion: gateway.k8s.aws/v1
+kind: TargetGroupConfiguration
+metadata:
+  name: nginx-tg
+  namespace: smoke
+spec:
+  targetReference:
+    name: nginx
+  defaultConfiguration:
+    targetType: ip
+---
+# ③ GatewayClass: "ALB 컨트롤러가 처리하는 Gateway 종류" (클러스터 전역)
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: aws-alb
+spec:
+  controllerName: gateway.k8s.aws/alb
+---
+# ④ Gateway = ALB 1개 + 리스너
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: smoke-gw
+  namespace: smoke
+spec:
+  gatewayClassName: aws-alb
+  infrastructure:
+    parametersRef:
+      group: gateway.k8s.aws
+      kind: LoadBalancerConfiguration
+      name: smoke-alb
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+---
+# ⑤ HTTPRoute = 리스너 규칙 (/ → nginx Service)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: nginx
+  namespace: smoke
+spec:
+  parentRefs:
+    - name: smoke-gw
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - name: nginx
+          port: 80
