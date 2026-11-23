@@ -208,14 +208,19 @@ spec:
           args:
             - |
               psql "host=$HOST user=$username dbname=point sslmode=require" -v ON_ERROR_STOP=1 <<SQL
-              DO \$\$ BEGIN
+              DO \$do\$ BEGIN
                 IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='app_rw') THEN
                   CREATE ROLE app_rw LOGIN PASSWORD '$APP_PW';
+                ELSE
+                  ALTER ROLE app_rw LOGIN PASSWORD '$APP_PW';
                 END IF;
-              END \$\$;
+              END \$do\$;
               GRANT CONNECT, CREATE ON DATABASE point TO app_rw;
               SQL
 ```
+- **`$$` 를 쓰지 않는다.** 쿠버네티스는 `args`/`command`/`env` 값의 `$$` 를 `$` 로 바꾼다 → PostgreSQL `DO $$` 가 깨짐 (7단계에서 실제로 겪음). 이름 붙은 달러 인용 `$do$` 사용.
+- SQL 은 7단계 7-6 에서 손으로 실행한 것과 같다 (ELSE 로 비밀번호 갱신까지 → 여러 번 실행해도 안전).
+
 ⚠️ 확인: ESO 정책에 RDS 마스터 비밀 ARN(`rds!db-*`) 읽기 권한을 추가해야 함, 멱등성(여러 번 실행해도 OK) 확인.
 
 ## ✅ 확인

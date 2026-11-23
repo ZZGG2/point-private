@@ -36,8 +36,8 @@ head -1 jwt-private.pem jwt-public.pem
 #   -----BEGIN PRIVATE KEY-----   ← "RSA PRIVATE KEY" 면 PKCS#1 → 앱이 못 읽음
 #   -----BEGIN PUBLIC KEY-----
 
-RDS=<terraform output -raw rds_endpoint>
-APP_PW=<7단계 app_rw 비밀번호>
+RDS=$(cd ~/point/point-private/envs/dev && terraform output -raw rds_endpoint)
+APP_PW=$(cat ~/.config/point-dev/app_rw_password)      # 7단계 7-6 에서 만든 파일
 
 # PEM 의 줄바꿈을 JSON 문자열로 안전하게 넣기 위해 jq --rawfile 사용
 jq -n --arg url "jdbc:postgresql://$RDS:5432/point?sslmode=require" \
@@ -50,6 +50,7 @@ aws secretsmanager create-secret --name point-dev/monolith      --secret-string 
 aws secretsmanager create-secret --name point-dev/event-service --secret-string file://event.json
 
 cd ~ && rm -rf ~/tmp-secrets       # 로컬 사본 삭제
+# app_rw 비밀번호 파일은 Secrets Manager 가 원본이 됐으므로 지워도 된다 (다음 날 7-6 재실행 때 쓰려면 남겨 둠)
 ```
 **왜 Terraform 으로 안 만드나:** `aws_secretsmanager_secret_version` 에 값을 넣으면 그 값이 **state 파일에 평문**으로 남는다. 비밀 "그릇"만 Terraform 으로 만들고 값은 CLI/콘솔로 넣는 방식도 흔하다.
 

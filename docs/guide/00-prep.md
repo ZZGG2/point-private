@@ -12,6 +12,7 @@ aws --version && terraform version && kubectl version --client && helm version
 | terraform 1.17.2 | `~/.local/bin/terraform` | |
 | kubectl 1.37.2 | `~/.local/bin/kubectl` | 아래 "kubectl 버전 맞추기" 참고 |
 | helm v4.3.2 | `~/.local/bin/helm` | |
+| jq 1.7.1 | `~/.local/bin/jq` | 7단계부터 필요 (Secrets Manager JSON 파싱). 설치법은 [07-data.md](07-data.md#사전-준비) |
 
 ### kubectl 버전 맞추기 (3단계 이후 실제로 겪은 문제)
 - kubectl 은 **클러스터와 ±1 마이너 버전**까지만 지원한다. 클러스터를 1.37 로 만들었는데 kubectl 이 1.35 였다.

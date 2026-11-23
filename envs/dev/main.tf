@@ -30,3 +30,20 @@ module "ecr" {
   source       = "../../modules/ecr"
   repositories = ["point/monolith", "point/event-service", "point/web"]
 }
+
+module "rds" {
+  source                     = "../../modules/rds"
+  name                       = local.name
+  vpc_id                     = module.vpc.vpc_id
+  db_subnet_group_name       = module.vpc.database_subnet_group
+  allowed_security_group_ids = [module.eks.node_security_group_id]
+  engine_version             = "16.15"
+}
+
+module "redis" {
+  source                     = "../../modules/elasticache"
+  name                       = local.name
+  vpc_id                     = module.vpc.vpc_id
+  subnet_ids                 = module.vpc.data_subnet_ids
+  allowed_security_group_ids = [module.eks.node_security_group_id]
+}

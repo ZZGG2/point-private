@@ -19,8 +19,8 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | 11 | [11-argocd.md](11-argocd.md) | Terraform 으로 ArgoCD + root, App of Apps, 수동 설치분 이전 |
 | 12 | [12-observability.md](12-observability.md) | kube-prometheus-stack + ServiceMonitor (또는 Container Insights) |
 
-> **0~5단계**는 실제로 진행한 결과를 반영했고, **6~12단계**는 진행 전에 미리 쓴 가이드다.
-> 6~12 문서의 "⚠️ 확인" 표시는 버전·필드명 등 진행 시점에 검증해야 하는 부분 → 실습하면서 고쳐 둘 것.
+> **0~5단계, 7단계**는 실제로 진행한 결과를 반영했고, 나머지(6, 8~12)는 진행 전에 미리 쓴 가이드다.
+> 그 문서들의 "⚠️ 확인" 표시는 버전·필드명 등 진행 시점에 검증해야 하는 부분 → 실습하면서 고쳐 둘 것.
 >
 > 특히 **9단계부터는 ROADMAP 과 다르다**: point-backend 가 `X-User-Id` 헤더 대신 JWT 인증으로 바뀌었고,
 > 데모 계정·이벤트는 `local` 프로필에서만 생긴다 → [09 문서 상단](09-point-app.md#️-roadmap-과-달라진-점-point-backend-현재-코드-기준) 참고.
@@ -31,8 +31,10 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 3. `aws eks update-kubeconfig --name point-dev-eks --region ap-northeast-2`
 4. 5단계: CRD 설치 → `values.yaml` 의 **vpcId 갱신** → Helm 설치 → `kubectl apply -f k8s/smoke/`
 5. 내 공인 IP 가 바뀌었으면 `terraform.tfvars` 의 `my_ip_cidr` 와 `30-gateway.yaml` 의 `sourceRanges` 수정
+6. (6단계 이후) ECR 은 `force_delete` 로 이미지째 삭제됨 → 이미지 다시 빌드·푸시
+7. (7단계 이후) RDS·Redis 는 `envs/dev` apply 에 포함. Strimzi Helm 설치 → `kubectl apply -f k8s/platform/kafka/kafka.yaml` → `app_rw` 다시 생성 (7-6, 비밀번호 파일 `~/.config/point-dev/app_rw_password` 재사용)
 
-## 이 실습에서 고정한 버전 (2026-11-20 기준)
+## 이 실습에서 고정한 버전 (2026-11-20 ~ 11-23 기준)
 
 | 항목 | 버전 | 비고 |
 |---|---|---|
@@ -45,8 +47,14 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | helm | v4.3.2 | |
 | AWS Load Balancer Controller | v3.6.3 (chart 3.6.3) | |
 | Gateway API CRD | v1.6.0 standard | |
+| jq | 1.7.1 (`~/.local/bin`) | WSL 기본 미설치 (07 문서 참고) |
+| RDS PostgreSQL | 16.15 (`db.t4g.micro`) | SSL 강제 (`sslmode=require`) |
+| ElastiCache Redis | 7.1.0 (`cache.t4g.micro`) | |
+| Strimzi | 1.3.1 → Kafka 4.3.2 (KRaft) | CRD 는 **`kafka.strimzi.io/v1`** 만 제공 (`v1beta2` 아님) |
 
 ## 공통 규칙
 - 리전 `ap-northeast-2` 고정, 모든 리소스 태그 `project=point-platform, env=dev, managed-by=terraform` (provider `default_tags`)
 - `*.tfstate`, `*.tfvars`, `kubeconfig*` 는 커밋하지 않는다 (`.gitignore`)
+- 새 `module` 블록을 추가하면 **`envs/dev` 에서 `terraform init`** (모듈 폴더 안에서 init 하지 않기)
+- 쿠버네티스 `command`/`args`/`env` 값의 `$$` 는 `$` 로 바뀐다 → SQL 달러 인용은 `$do$` 사용
 - 하루 실습이 끝나면 **역순 정리** → [05 문서의 정리 순서](05-lbc-gateway.md#정리-순서-중요) + ROADMAP 맨 아래
