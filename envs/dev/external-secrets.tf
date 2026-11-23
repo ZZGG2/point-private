@@ -9,6 +9,11 @@ data "aws_iam_policy_document" "eso" {
       "arn:aws:secretsmanager:ap-northeast-2:${data.aws_caller_identity.current.account_id}:secret:point-dev/*"
     ]
   }
+  # 11단계 db-init Job (ADR-0013): RDS 마스터 비밀 "하나만" 추가. rds!db-* 와일드카드는 쓰지 않는다
+  statement {
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+    resources = [module.rds.master_secret_arn]
+  }
 }
 
 resource "aws_iam_policy" "eso" {

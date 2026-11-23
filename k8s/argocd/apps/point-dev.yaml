@@ -20,4 +20,5 @@ spec:
       name: event-service
       jsonPointers: [/spec/replicas]
   syncPolicy:
+    automated: { prune: true, selfHeal: true }   # 11-5: 수동 Sync 로 Diff 확인 후 켬
     syncOptions: [CreateNamespace=true, RespectIgnoreDifferences=true]

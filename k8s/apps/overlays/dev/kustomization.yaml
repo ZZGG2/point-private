@@ -8,6 +8,7 @@ resources:
   - external-secrets.yaml
   - gateway.yaml
   - scaledobject.yaml              # 10단계
+  - db-init.yaml                  # 11단계 (ArgoCD PreSync hook)
 configMapGenerator:
   - name: monolith-config
     literals:

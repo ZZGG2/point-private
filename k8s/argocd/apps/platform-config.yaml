@@ -20,4 +20,5 @@ spec:
     server: https://kubernetes.default.svc
     namespace: kafka               # namespace 가 없는 리소스(Kafka, KafkaNodePool)의 기본값. 나머지는 클러스터 전역
   syncPolicy:
+    automated: { prune: true, selfHeal: true }   # 11-5: 수동 Sync 로 Diff 확인 후 켬
     syncOptions: [ServerSideApply=true]
