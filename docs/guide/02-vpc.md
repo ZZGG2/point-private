@@ -62,6 +62,8 @@ module "vpc" {
 
   enable_dns_hostnames         = true # EKS 필수
   create_database_subnet_group = true # 7단계 RDS용
+  # Data 서브넷 전용 라우트 테이블 (0.0.0.0/0 없음 → DB 계층 인터넷 격리). 13단계 테스트에서 누락 발견 후 추가
+  create_database_subnet_route_table = true
 
   # 이 태그가 없으면 5단계에서 LB Controller가 서브넷을 못 찾음
   public_subnet_tags = {
@@ -92,6 +94,7 @@ resource "aws_vpc_endpoint" "s3" {
 |---|---|
 | `private_subnets` | 커뮤니티 모듈 용어. 우리 설계의 Private-App |
 | `database_subnets` | Private-Data. `create_database_subnet_group` 로 RDS 서브넷 그룹도 생성 |
+| `create_database_subnet_route_table` | **Data 서브넷 전용 라우트 테이블.** 기본값 false 면 모듈이 Data 서브넷을 private(App) 라우트 테이블에 붙여서 **NAT 경로(0.0.0.0/0)가 생긴다** → 3-Tier 격리가 깨짐. NAT/IGW 경로는 `create_database_nat_gateway_route` / `create_database_internet_gateway_route` 를 켤 때만 추가된다 (둘 다 기본 false) |
 | `single_nat_gateway = true` | NAT 1개(2a)만. 학습 비용 절감. 2a 장애 시 2b/2c private 도 인터넷 끊김 → 운영은 AZ별 |
 | `kubernetes.io/role/elb = 1` | LB Controller 가 **인터넷용 ALB 를 둘 서브넷**을 찾는 태그 |
 | `kubernetes.io/role/internal-elb = 1` | 내부 ALB/NLB 용 서브넷 |
@@ -159,6 +162,8 @@ terraform apply
 ```
 **plan 에서 볼 것** (≈ 30개 리소스):
 서브넷 9, NAT GW **1**, EIP 1, IGW 1, 라우트 테이블(public 1 / private 1 / database 1) + association, DB 서브넷 그룹, S3 엔드포인트.
+- ⚠️ 처음에는 `create_database_subnet_route_table` 없이 apply 해서 database 라우트 테이블이 **없었고**, Data 서브넷 3개가 private 라우트 테이블(→ NAT)에 붙어 있었다. 13단계 테스트(`tests/run.sh 02`)에서 발견해 추가 → plan `1 to add, 4 to change, 0 to destroy` (라우트 테이블 1 + Data 서브넷 연결 3 + S3 엔드포인트 연결). RDS·Redis 재생성 없음.
+- 그 plan 에서 S3 엔드포인트가 `- "rtb-...(private)" ] -> (known after apply)` 로 보이지만 빠지는 게 아니다 — 새 라우트 테이블 ID 가 아직 몰라서 리스트 전체가 unknown 으로 표시될 뿐, 결과는 private + database 두 개.
 
 💸 apply 순간부터 NAT ≈ $0.06/h + EIP(퍼블릭 IPv4) ≈ $0.005/h.
 
@@ -178,7 +183,7 @@ aws ec2 describe-subnets --filters Name=vpc-id,Values=$VPC_ID Name=tag:kubernete
 aws ec2 describe-nat-gateways --filter Name=vpc-id,Values=$VPC_ID \
   --query 'NatGateways[].[NatGatewayId,State,SubnetId]' --output table
 
-# 라우트: public → igw, private → nat + S3 prefix list(pl-xxx)
+# 라우트: public → igw, private → nat + S3 prefix list(pl-xxx), db → local + S3 만 (0.0.0.0/0 없음)
 aws ec2 describe-route-tables --filters Name=vpc-id,Values=$VPC_ID \
   --query 'RouteTables[].[Tags[?Key==`Name`].Value|[0], Routes[].[DestinationCidrBlock||DestinationPrefixListId, NatGatewayId||GatewayId]]'
 
@@ -187,7 +192,8 @@ aws s3 ls s3://point-eks-tfstate-020208/envs/dev/
 ```
 
 ## 📘 이해할 것
-- **Public vs Private 의 차이는 라우트 테이블의 `0.0.0.0/0` 이 IGW 냐 NAT 냐 뿐.** 서브넷 자체엔 "public" 속성이 없다.
+- **Public vs Private 의 차이는 라우트 테이블의 `0.0.0.0/0` 이 IGW 냐 NAT 냐 뿐.** 서브넷 자체엔 "public" 속성이 없다. 같은 논리로 **Data 계층의 격리 = `0.0.0.0/0` 경로가 아예 없는 라우트 테이블.**
+- 확인은 "라우트 테이블 이름"이 아니라 **서브넷에 실제로 연결된 라우트 테이블**로 해야 한다 (처음엔 이름으로 찾아서 잘못 통과했다).
 - **App 서브넷이 /19(8,187 IP)로 큰 이유**: VPC CNI 는 파드마다 VPC IP 를 준다 → 노드 수가 아니라 파드 수만큼 IP 가 필요. Prefix Delegation(3단계)은 /28 블록 단위로 가져가서 더 빨리 소모된다.
 - **CIDR 은 바꾸지 않는다**: 변경 = VPC 재생성 = 위에 올린 모든 것 재구축. 다른 VPC/온프렘과 겹치지 않게 처음에 확정.
 

@@ -16,6 +16,9 @@ module "vpc" {
 
   enable_dns_hostnames         = true # EKS 필수
   create_database_subnet_group = true # 7단계 RDS용
+  # Data 서브넷 전용 라우트 테이블 (기본 경로 0.0.0.0/0 없음 → DB 계층 인터넷 격리)
+  # 없으면 모듈이 Data 서브넷을 private(App) 라우트 테이블에 붙여서 NAT 경로가 생긴다 (13단계 테스트에서 발견)
+  create_database_subnet_route_table = true
 
   # 이 태그가 없으면 5단계에서 LB Controller가 서브넷을 못 찾음
   public_subnet_tags = {

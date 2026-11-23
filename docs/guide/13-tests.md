@@ -56,19 +56,24 @@ tests/
 | WARN | 작업 트리 미커밋 (테스트 파일 작성 중) |
 | WARN | 리소스 떠 있음 — 과금 중 (의도) |
 | WARN | LBC error 로그 14건 — 전부 smoke Gateway 삭제 직후 재시도 오류 (`still in use`, SG 삭제 대기). 고아 SG 없음 확인 |
-| **WARN (발견)** | **Data 서브넷이 App 라우트 테이블(→NAT)을 공유** — 아래 발견 ① |
+| **WARN (발견)** | **Data 서브넷이 App 라우트 테이블(→NAT)을 공유** — 아래 발견 ①, 이후 수정 |
 | `--heavy` 확장 | k6 29,999 req, p95 48ms, 실패 0 / HPA 1 → 9 (첫 증가 48초) / NodeClaim 1 → 3 |
 | `--heavy` selfHeal | `kubectl scale web` → 1초 만에 Git 값(2) |
 | E2E | 당첨 → Kafka → 정산 대기 반영 327ms, 정산 후 잔액 +100, 재정산 멱등 |
 
 ### 테스트로 새로 드러난 것
-**① Data 서브넷에 인터넷 경로가 있다 (2단계 설계와 다름)**
+**① Data 서브넷에 인터넷 경로가 있다 (2단계 설계와 다름) → ✅ 2026-11-23 16:08 수정함**
 ```
 rtb-...-private  subnets = App 3개 + Data 3개   routes = 0.0.0.0/0 → nat-..., S3 pl → vpce-...
 ```
 - terraform-aws-modules/vpc 는 `create_database_subnet_route_table = true` 가 아니면 database 서브넷을 private 라우트 테이블에 붙인다.
 - 영향: RDS 는 퍼블릭 IP 가 없고 SG 가 노드 SG 만 허용하므로 **외부에서 들어오는 경로는 없다.** 다만 "Data 계층은 밖으로 나가는 경로도 없음"이라는 3-Tier 의도와 다르다 (예: 침해된 DB 가 외부로 유출하는 경로).
-- 고치려면 `modules/vpc/main.tf` 에 `create_database_subnet_route_table = true` → plan 으로 라우트 테이블 1개 추가 + 연결 변경 확인 후 apply. (RDS 재생성 없음 — 서브넷은 그대로)
+- 수정: `modules/vpc/main.tf` 에 `create_database_subnet_route_table = true` → plan `1 to add, 4 to change, 0 to destroy` → apply.
+  ```
+  point-dev-vpc-db       subnets=3  routes = 10.10.0.0/16→local, pl-(S3)→vpce-...      ← 0.0.0.0/0 없음
+  point-dev-vpc-private  subnets=3  routes = 10.10.0.0/16→local, 0.0.0.0/0→nat-..., pl-(S3)→vpce-...
+  ```
+  재검증 `tests/run.sh 01 02 07 09` → PASS 102 · FAIL 0 · **WARN 0** (drift 0, app_rw·Redis·Kafka·E2E 정상). [02 문서](02-vpc.md)에도 반영.
 - 처음 쓴 검사는 "이름에 db 가 들어간 라우트 테이블"을 찾았는데 그런 테이블이 없어서 **잘못 PASS** 했다 → "서브넷에 실제로 연결된 라우트 테이블" 기준으로 고쳤다. 검사도 검증이 필요하다.
 
 **② 노드 간 파드 통신은 1025 이상 포트만 된다**
