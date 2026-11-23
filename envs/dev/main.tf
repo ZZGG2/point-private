@@ -25,3 +25,8 @@ module "eks" {
   subnet_ids          = module.vpc.app_subnet_ids
   public_access_cidrs = [var.my_ip_cidr]
 }
+
+module "ecr" {
+  source       = "../../modules/ecr"
+  repositories = ["point/monolith", "point/event-service", "point/web"]
+}
