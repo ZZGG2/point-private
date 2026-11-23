@@ -10,7 +10,6 @@ resources:
   - scaledobject.yaml              # 10단계
   - db-init.yaml                  # 11단계 (ArgoCD PreSync hook)
   - servicemonitor.yaml           # 12단계
-  - gitops-prune-test.yaml
 configMapGenerator:
   - name: monolith-config
     literals:
