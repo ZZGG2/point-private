@@ -1,0 +1,23 @@
+# 컨트롤러의 CRD 를 쓰는 플랫폼 리소스: GatewayClass, NodePool/EC2NodeClass, ClusterSecretStore, Kafka
+# k8s/platform 아래에는 Helm values.yaml 도 있으므로 include 로 매니페스트만 고른다
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: platform-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ZZGG2/point-private.git
+    targetRevision: master
+    path: k8s/platform
+    directory:
+      recurse: true
+      include: "{gateway/*.yaml,karpenter/nodepool-*.yaml,external-secrets/*.yaml,kafka/*.yaml}"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka               # namespace 가 없는 리소스(Kafka, KafkaNodePool)의 기본값. 나머지는 클러스터 전역
+  syncPolicy:
+    syncOptions: [ServerSideApply=true]

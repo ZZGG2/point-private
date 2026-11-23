@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: point-dev
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ZZGG2/point-private.git
+    targetRevision: master
+    path: k8s/apps/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: point
+  ignoreDifferences:                       # KEDA(HPA) 가 바꾸는 replicas 는 무시
+    - group: apps
+      kind: Deployment
+      name: event-service
+      jsonPointers: [/spec/replicas]
+  syncPolicy:
+    syncOptions: [CreateNamespace=true, RespectIgnoreDifferences=true]

@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keda
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: default
+  sources:
+    - repoURL: https://kedacore.github.io/charts
+      chart: keda
+      targetRevision: 2.21.1
+      helm:
+        releaseName: keda
+        valueFiles: [$values/k8s/platform/keda/values.yaml]
+    - repoURL: https://github.com/ZZGG2/point-private.git
+      targetRevision: master
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keda
+  # keda-operator 가 실행 중에 caBundle 을 채운다 → 무시
+  ignoreDifferences:
+    - group: apiregistration.k8s.io
+      kind: APIService
+      jqPathExpressions: [".spec.caBundle"]
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions: [".webhooks[]?.clientConfig.caBundle"]
+  syncPolicy:
+    syncOptions: [ServerSideApply=true, RespectIgnoreDifferences=true, CreateNamespace=true]

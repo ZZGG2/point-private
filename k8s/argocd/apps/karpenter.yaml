@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: karpenter
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+spec:
+  project: default
+  sources:
+    - repoURL: public.ecr.aws/karpenter      # OCI — argocd.tf 의 configs.repositories 에 enableOCI 로 등록
+      chart: karpenter
+      targetRevision: 1.15.3
+      helm:
+        releaseName: karpenter
+        valueFiles: [$values/k8s/platform/karpenter/values.yaml]
+    - repoURL: https://github.com/ZZGG2/point-private.git
+      targetRevision: master
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    syncOptions: [ServerSideApply=true]

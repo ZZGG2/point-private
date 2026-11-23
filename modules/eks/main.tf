@@ -33,9 +33,9 @@ module "eks" {
     core = {
       instance_types = var.core_instance_types
       capacity_type  = "ON_DEMAND"
-      min_size       = 2
-      max_size       = 3
-      desired_size   = 2
+      min_size       = 3 # 11·12단계: ArgoCD + kube-prometheus-stack 용량 (원래 2)
+      max_size       = 4
+      desired_size   = 3 # ⚠️ 모듈이 desired_size 변경을 무시(ignore_changes) → 늘릴 땐 CLI 로 먼저
       labels         = { workload = "core" }
     }
   }

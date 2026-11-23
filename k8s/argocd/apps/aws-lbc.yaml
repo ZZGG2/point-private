@@ -1,0 +1,36 @@
+# 5단계에서 helm install 한 것을 ArgoCD 로 이전. releaseName 을 같게 → 리소스 이름이 같아서 그대로 매칭
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-lbc
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"     # 컨트롤러 먼저 (Gateway 리소스보다 앞)
+spec:
+  project: default
+  sources:
+    - repoURL: https://aws.github.io/eks-charts
+      chart: aws-load-balancer-controller
+      targetRevision: 3.6.3
+      helm:
+        releaseName: aws-load-balancer-controller
+        valueFiles: [$values/k8s/platform/aws-lbc/values.yaml]
+    - repoURL: https://github.com/ZZGG2/point-private.git
+      targetRevision: master
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  # 차트가 렌더링할 때마다 웹훅 TLS 인증서를 새로 만든다 → 매번 OutOfSync 가 되지 않게 무시
+  ignoreDifferences:
+    - kind: Secret
+      name: aws-load-balancer-tls
+      jsonPointers: [/data]
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jqPathExpressions: [".webhooks[]?.clientConfig.caBundle"]
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions: [".webhooks[]?.clientConfig.caBundle"]
+  syncPolicy:
+    syncOptions: [ServerSideApply=true, RespectIgnoreDifferences=true]
