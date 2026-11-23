@@ -1,74 +1,115 @@
-# 12단계. 관측성 (메트릭, 로그)
+# 12단계. 관측성 (메트릭)
 
 ## 목표
-10단계 부하 테스트 중 **파드 수 / CPU / 응답시간**을 그래프로 본다.
+10단계 부하 테스트 중 **파드 수 / 노드 수 / CPU / RPS / 응답시간**을 그래프로 본다.
 
 설계 (`../point-infra/docs/05-operations/observability.md`):
-| 신호 | 운영 설계 |
-|---|---|
-| Metrics | kube-prometheus-stack + Micrometer → Grafana |
-| Logs | Fluent Bit → CloudWatch Logs |
-| 관리형 지표 | CloudWatch (RDS, ElastiCache) → Grafana CloudWatch datasource |
+| 신호 | 운영 설계 | 이번 실습 |
+|---|---|---|
+| Metrics | kube-prometheus-stack + Micrometer → Grafana | ✅ 진행 |
+| Logs | Fluent Bit → CloudWatch Logs | 생략 (`kubectl logs`) — 아래 "로그" 참고 |
+| 관리형 지표 | CloudWatch (RDS, ElastiCache) → Grafana CloudWatch datasource | 생략 |
 
-> 아직 실습 전 작성한 가이드. "⚠️ 확인" 은 진행 시 갱신.
+> 2026-11-23 실제로 진행한 결과를 반영한 문서. kube-prometheus-stack **93.9.0** (operator v0.95.2, Prometheus v3.16.0, Grafana 13.3.1). **11단계 ArgoCD 로 설치.**
 
-둘 중 하나로 시작한다.
-
-| | A. CloudWatch Container Insights | B. kube-prometheus-stack |
+방식 선택:
+| | A. CloudWatch Container Insights | **B. kube-prometheus-stack (선택)** |
 |---|---|---|
 | 설치 | EKS 애드온 1개 | Helm 차트 1개 (+ ServiceMonitor) |
-| 클러스터 부하 | 작음 (DaemonSet 에이전트) | **큼** (Prometheus 1~2Gi, Grafana, 노드당 exporter) |
-| 비용 | 지표·로그 수집량만큼 **CloudWatch 과금** | 클러스터 자원만 (노드 여유 필요) |
-| 앱 지표(Spring) | 별도 설정 필요 | `/actuator/prometheus` 바로 수집 |
-| 설계와 일치 | 로그 쪽 | **메트릭 쪽 (운영 설계)** |
+| 클러스터 부하 | 작음 (DaemonSet 에이전트) | 큼 (Prometheus 1Gi+, Grafana, 노드당 exporter) |
+| 비용 | 지표·로그 수집량만큼 CloudWatch 과금 | 클러스터 자원만 |
+| 앱 지표(Spring) | 별도 설정 | `/actuator/prometheus` 바로 수집 |
+| 설계와 일치 | 로그 쪽 | 메트릭 쪽 |
 
-권장: **B** (운영 설계와 같고, 10단계 ADR 측정에 앱 지표가 필요).
+## 12-1. 용량과 비밀번호
+- 용량: 11단계에서 core 노드를 **3대**로 늘려 둠 ([11-2](11-argocd.md#11-2-용량--core-노드-2--3대)).
+- Grafana 관리자 비밀번호는 **Git 에 넣지 않는다** → 차트의 `grafana.admin.existingSecret` 으로 직접 만든 Secret 을 쓰게 한다:
+  ```bash
+  kubectl create namespace monitoring
+  (umask 077; openssl rand -hex 12 > ~/.config/point-dev/grafana_admin_password)     # 레포 밖, 600
+  kubectl create secret generic grafana-admin -n monitoring \
+    --from-literal=admin-user=admin \
+    --from-literal=admin-password="$(cat ~/.config/point-dev/grafana_admin_password)"
+  ```
 
----
+### 문제 ① — Grafana 로그인 실패 (`Invalid username or password`)
+- 처음엔 `--from-file=admin-password=<파일>` 로 만들었다 → **파일 끝 줄바꿈까지 값에 들어감** (24자 비밀번호가 25바이트).
+  ```bash
+  kubectl get secret -n monitoring grafana-admin -o jsonpath='{.data.admin-password}' | base64 -d | wc -c   # 25 → 문제, 24 → 정상
+  ```
+- 해결: `--from-literal="$(cat 파일)"` (`$(...)` 가 끝 줄바꿈을 제거) 로 다시 만들고 `kubectl rollout restart -n monitoring deploy/kps-grafana`.
+- Grafana 는 관리자 비밀번호를 **첫 기동 때 DB 에 저장**한다. 이번 구성은 영속 볼륨이 없어서 재시작하면 DB 가 새로 만들어져 새 값이 적용됐다 (PVC 를 쓰면 `grafana-cli admin reset-admin-password` 필요).
 
-## B. kube-prometheus-stack
-
-### B-1. 용량
-Prometheus + Grafana + Alertmanager + node-exporter + kube-state-metrics ≈ CPU 0.5, 메모리 2~3Gi.
-core 노드그룹 여유 확인 (`kubectl describe nodes | grep -A8 "Allocated resources"`), 부족하면 노드 추가.
-
-### B-2. 설치
-```bash
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts && helm repo update
-```
-**`k8s/platform/monitoring/values.yaml`**
+## 12-2. 설치 — ArgoCD Application
+**[`k8s/platform/monitoring/values.yaml`](../../k8s/platform/monitoring/values.yaml)**
 ```yaml
 prometheus:
   prometheusSpec:
-    retention: 1d                                    # 실습
+    retention: 1d
     resources:
       requests: { cpu: 200m, memory: 1Gi }
-    # 모든 namespace 의 ServiceMonitor 를 라벨 상관없이 수집
+      limits:   { memory: 1536Mi }
+    # 모든 namespace 의 ServiceMonitor/PodMonitor 를 release 라벨 상관없이 수집
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
 alertmanager:
-  enabled: false                                     # 실습: 알람 생략
+  enabled: false
 grafana:
-  adminPassword: <임의 값 — Git 에 커밋하지 말 것, --set 으로 넘기기>
-```
-```bash
-helm install kps prometheus-community/kube-prometheus-stack -n monitoring --create-namespace \
-  -f k8s/platform/monitoring/values.yaml --set grafana.adminPassword=$(openssl rand -hex 8)
-kubectl get pods -n monitoring
-kubectl get secret -n monitoring kps-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
-kubectl port-forward -n monitoring svc/kps-grafana 3000:80        # http://localhost:3000 (admin)
+  admin:
+    existingSecret: grafana-admin
+  sidecar:
+    dashboards:
+      searchNamespace: ALL                  # grafana_dashboard=1 라벨 ConfigMap 을 모든 ns 에서
+kube-state-metrics:
+  # 노드 라벨 중 이것만 kube_node_labels 로 노출 → Karpenter 노드 수를 셀 수 있다
+  metricLabelsAllowlist:
+    - nodes=[workload,karpenter.sh/capacity-type,node.kubernetes.io/instance-type]
+# EKS 컨트롤플레인은 AWS 관리 → 수집 불가. 켜 두면 타겟이 항상 DOWN
+kubeEtcd: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }               # EKS kube-proxy 는 metrics 를 127.0.0.1 에만 엶
 ```
 - `serviceMonitorSelectorNilUsesHelmValues: false` 가 없으면 Prometheus 는 `release: kps` 라벨이 붙은 ServiceMonitor 만 본다 → 앱 지표가 안 잡히는 가장 흔한 원인.
-- 11단계 이후라면 이것도 ArgoCD Application 으로.
+- `metricLabelsAllowlist` 가 없으면 kube-state-metrics 는 노드 라벨을 노출하지 않아 `kube_node_labels{label_workload="event"}` 가 비어 있다.
 
-### B-3. 앱 지표 수집 (ServiceMonitor)
+**[`k8s/argocd/apps/monitoring.yaml`](../../k8s/argocd/apps/monitoring.yaml)** — 11단계 multi-source 패턴, wave -2 (ServiceMonitor CRD 를 point-dev 보다 먼저):
+```yaml
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 93.9.0
+      helm:
+        releaseName: kps
+        valueFiles: [$values/k8s/platform/monitoring/values.yaml]
+    - repoURL: https://github.com/<계정>/point-private.git
+      targetRevision: master
+      ref: values
+  destination: { server: https://kubernetes.default.svc, namespace: monitoring }
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }
+    syncOptions: [ServerSideApply=true, CreateNamespace=true]   # CRD 가 커서 SSA 필수
+```
+설치 흐름 (push 후 약 1분 반): admission-create Job(Helm hook → ArgoCD PreSync 로 매핑) → CRD → operator → Prometheus → Grafana.
+- Grafana 이미지가 488MB 라 pull 에 38초 → 그동안 Application 이 잠깐 `Degraded` 로 보였다가 `Healthy`. 일시적.
+```bash
+kubectl get pods -n monitoring   # grafana(3/3), operator, kube-state-metrics, node-exporter×노드 수, prometheus-...-0 (2/2)
+kubectl get svc -n monitoring    # kps-grafana:80, kps-kube-prometheus-stack-prometheus:9090
+```
+
+## 12-3. 앱 지표 수집 (ServiceMonitor)
 point-backend 는 이미 `management.endpoints.web.exposure.include: health,info,prometheus` → `/actuator/prometheus` 가 열려 있다.
 
-Service 포트에 **이름**이 있어야 ServiceMonitor 가 참조할 수 있다 → base Service 수정:
+**base Service 3개 수정** — 포트 **이름**과 `app` **라벨** (ServiceMonitor 는 Service 라벨로 찾고, 포트를 이름으로 참조):
 ```yaml
+metadata:
+  name: monolith
+  labels: { app: monolith }
+spec:
+  selector: { app: monolith }
   ports: [{ name: http, port: 80, targetPort: 8080 }]
 ```
-**`k8s/apps/overlays/dev/servicemonitor.yaml`**
+**[`k8s/apps/overlays/dev/servicemonitor.yaml`](../../k8s/apps/overlays/dev/servicemonitor.yaml)** (kustomization `resources` 에 추가)
 ```yaml
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
@@ -83,94 +124,131 @@ spec:
       path: /actuator/prometheus
       interval: 15s
 ```
-- Service 에 `app` 라벨이 있어야 selector 가 매칭된다 → base Service `metadata.labels: { app: monolith }` 추가.
 
-**응답시간 p95 를 보려면 히스토그램 활성화** (기본은 count/sum/max 만 나와서 백분위수 계산 불가). overlay ConfigMap 에 추가:
+**응답시간 p95 를 위한 히스토그램** (기본은 count/sum/max 만 → 백분위수 계산 불가). overlay 의 두 ConfigMap 에 추가:
 ```
-MANAGEMENT_METRICS_DISTRIBUTION_PERCENTILES_HISTOGRAM_HTTP_SERVER_REQUESTS=true
+MANAGEMENT_METRICS_DISTRIBUTION_PERCENTILESHISTOGRAM_HTTP_SERVER_REQUESTS=true
 ```
-(Spring 의 relaxed binding: `management.metrics.distribution.percentiles-histogram.http.server.requests=true`)
 
+### 문제 ② — monolith·event-service 새 파드 CrashLoopBackOff
+처음엔 `..._PERCENTILES_HISTOGRAM_HTTP_SERVER_REQUESTS=true` 로 썼다:
+```
+Failed to bind properties under 'management.metrics.distribution.percentiles.histogram.http.server.requests' to double[]:
+    Reason: failed to convert java.lang.String to double (... For input string: "true")
+```
+- 원인: 환경변수의 `_` 는 `.` 이 된다 → `percentiles-histogram`(boolean) 이 아니라 **`percentiles`(double[])** 맵의 `histogram.http.server.requests` 키로 해석.
+- 해결: Spring relaxed binding 규칙 — **하이픈이 든 속성은 하이픈을 빼고** 쓴다 → `PERCENTILESHISTOGRAM`. (9단계 `APP_ADMIN_APITOKEN` 과 같은 규칙: `api-token` → `APITOKEN`)
+- 피해 없음: `maxUnavailable: 0` 이라 기존 파드가 계속 서비스했다. 고친 커밋 push → ArgoCD 가 1분 내 반영 → 롤링 완료.
+
+### 확인
 ```bash
-kubectl apply -k k8s/apps/overlays/dev
-# Prometheus UI 에서 타겟 확인
 kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090:9090
-# → http://localhost:9090/targets 에 serviceMonitor/point/point-backend UP
+# http://localhost:9090/targets 또는 API:
+curl -s 'http://localhost:9090/api/v1/targets?state=active' | jq -r '.data.activeTargets[] | select(.labels.namespace=="point") | "\(.labels.job) \(.labels.pod) \(.health)"'
+curl -s 'http://localhost:9090/api/v1/targets?state=active' | jq '[.data.activeTargets[] | select(.health!="up")] | length'
 ```
-⚠️ 확인: Prometheus Service 이름 (`kubectl get svc -n monitoring`).
-
-### B-4. 대시보드 (부하 테스트용)
-Grafana → New dashboard → 패널 추가 (PromQL):
-
-| 패널 | 쿼리 |
+| 확인 | 결과 |
 |---|---|
-| event-service 파드 수 | `count(kube_pod_status_ready{namespace="point", pod=~"event-service-.*", condition="true"})` |
-| 노드 수 (Karpenter) | `count(kube_node_labels{label_workload="event"})` ⚠️ kube-state-metrics 는 기본으로 노드 라벨을 일부만 노출 → 안 나오면 `count(kube_node_info)` |
-| 파드별 CPU | `sum by (pod) (rate(container_cpu_usage_seconds_total{namespace="point", container="event-service"}[1m]))` |
-| RPS | `sum(rate(http_server_requests_seconds_count{namespace="point", service="event-service"}[1m]))` |
-| p95 응답시간 | `histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{service="event-service"}[1m])))` |
-| 상태코드별 | `sum by (status) (rate(http_server_requests_seconds_count{service="event-service"}[1m]))` |
-| HPA 목표 vs 현재 | `kube_horizontalpodautoscaler_status_current_replicas` / `..._spec_max_replicas` |
+| point 타겟 | monolith ×2, event-service ×1 — 전부 `up` |
+| DOWN 타겟 | **0** (컨트롤플레인 수집을 끈 덕분) |
+| `http_server_requests_seconds_bucket` | monolith 207 시리즈, event-service 138 시리즈 |
+| `kube_node_labels` by workload | core 3, event 1 |
 
-- 기본 제공 대시보드: "Kubernetes / Compute Resources / Namespace (Pods)" 로 `point` 선택.
-- JVM: Grafana.com 대시보드 ID **4701** (JVM Micrometer) Import.
-- 대시보드 JSON 은 Export 해서 `k8s/platform/monitoring/dashboards/` 에 커밋 → 재현 가능.
+## 12-4. 대시보드 — 코드로 ([`k8s/platform/monitoring/dashboards/point-scaling.yaml`](../../k8s/platform/monitoring/dashboards/point-scaling.yaml))
+Grafana UI 에서 만들고 Export 하는 대신, **ConfigMap 으로 커밋** → Grafana 사이드카가 `grafana_dashboard: "1"` 라벨을 보고 자동으로 불러온다. 11단계 `platform-config` Application 의 `include` 에 `monitoring/dashboards/*.yaml` 추가.
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dashboard-point-scaling
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  point-scaling.json: |
+    { "uid": "point-scaling", "title": "point — 이벤트 확장 (10단계 부하 테스트)", "panels": [ ... ] }
+```
+패널 (datasource uid `prometheus` — 차트가 만드는 기본 데이터소스):
+| 패널 | PromQL |
+|---|---|
+| 파드 (Ready) vs HPA 목표 | `count(kube_pod_status_ready{namespace="point",pod=~"event-service-.*",condition="true"})`, `kube_horizontalpodautoscaler_status_desired_replicas{horizontalpodautoscaler="keda-hpa-event-service"}` |
+| 노드 수 | `count by (label_workload, label_karpenter_sh_capacity_type) (kube_node_labels)` |
+| CPU (requests 대비 %) | `sum(rate(container_cpu_usage_seconds_total{namespace="point",container="event-service"}[1m])) / sum(kube_pod_container_resource_requests{namespace="point",container="event-service",resource="cpu"}) * 100` |
+| RPS (상태코드별) | `sum by (status) (rate(http_server_requests_seconds_count{namespace="point",service="event-service",uri!~"/actuator.*"}[1m]))` |
+| p50/p95/p99 | `histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{namespace="point",service="event-service",uri!~"/actuator.*"}[1m])))` |
+| JVM heap | `sum by (pod) (jvm_memory_used_bytes{namespace="point",area="heap"})` |
+- `uri!~"/actuator.*"` — Prometheus 수집·probe 요청이 RPS/지연을 왜곡하지 않게 제외.
+- CPU 패널은 HPA 와 같은 기준(requests 대비 %)으로 그려서 목표 60% 와 직접 비교.
+- 기본 대시보드도 쓸 만하다: "Kubernetes / Compute Resources / Namespace (Pods)" → `point`.
 
-### B-5. (선택) 로그 — Loki
 ```bash
-helm repo add grafana https://grafana.github.io/helm-charts
-# loki (single binary, filesystem) + promtail/alloy → Grafana datasource 추가
+kubectl port-forward -n monitoring svc/kps-grafana 3000:80      # http://localhost:3000 (admin / ~/.config/point-dev/grafana_admin_password)
+curl -s -u admin:$(cat ~/.config/point-dev/grafana_admin_password) 'http://localhost:3000/api/search?query=point' | jq     # uid point-scaling
 ```
-⚠️ 확인: Loki 차트의 single-binary 최소 구성 values (차트 버전마다 다름). 리소스 여유 없으면 생략하고 `kubectl logs` / CloudWatch 로.
 
----
+## ✅ 확인 — 부하 테스트를 다시 돌리며 (14:58:24 ~ 15:04:25 KST)
+10단계와 같은 k6 스크립트·demo5 토큰. k6: 98,464 건, 실패 0%, **p95 47.4ms**.
+Prometheus `query_range` (step 30s) 로 대시보드 쿼리를 그대로 뽑은 값 (1분 간격):
+| 시리즈 | 값 (1분 간격) | 최대 |
+|---|---|---|
+| event-service Ready 파드 | 1 → 1 → 2 → 4 → 7 → 7 → 7 → 8 → 11 | 11 |
+| HPA desired | 1 → 1 → 2 → 7 → 7 → 7 → 7 → 11 → 11 | 11 |
+| event 노드 | 1 → 1 → 1 → 2 → 2 → 2 → 2 → 3 → 3 | 3 (core 는 3 고정) |
+| CPU (requests 대비 %) | 3 → 2 → **169** → 50 → 15 → 1 → **97** → 35 | 169% (부하 시작 직후) |
+| RPS (409) | 69 → 264 → 292 → 288 → 289 → 292 → 70 | 308 |
+| 서버 측 p95 | 6.8 → 12 → 5.4 → 8.4 → 5.4 → 13 → 3.7 ms | 13ms |
 
-## A. CloudWatch Container Insights (대안)
-EKS 애드온 `amazon-cloudwatch-observability` + Pod Identity.
+10단계에서 기대했던 모습과 대조:
+- ✅ **파드 수가 계단식으로** 오르고 HPA desired 를 Ready 가 약 30초~1분 뒤 따라간다 (노드가 필요한 파드는 노드 Ready 33초 + 기동).
+- ✅ **노드 수가 파드를 뒤따라** 1 → 2 → 3.
+- ✅ CPU 가 목표 60% 를 크게 넘자(169%) 바로 확장, 파드가 늘자 50% → 15% 로 떨어짐.
+- ⚠️ 부하 후반(15:03)에 CPU 가 다시 97% → 11개로 한 번 더 확장. 원인은 **확인하지 못했다** (CPU 시리즈 중간의 1% 구간은 metrics 수집 공백일 가능성도 있음). 다음에 Grafana 로 파드별 CPU·JVM GC 를 같이 보며 확인할 것.
+- 💡 **서버 측 p95(≤13ms) vs k6 p95(47ms)** — 차이 ≈ 집 → 서울 리전 네트워크 + ALB. 서버는 확장 중에도 느려지지 않았다 → 지연의 대부분은 앱 밖. 이것이 "클라이언트 지표와 서버 지표를 둘 다 봐야 하는" 이유.
+- 응답이 전부 409 인 것: demo5 는 첫 부하 테스트에서 이미 참여 → 중복. 부하 경로(JWT 검증 + Redis 조회)는 동일.
 
-`modules/eks` 의 `addons` 에 추가 + IAM:
-```hcl
-# envs/dev/cloudwatch.tf
-resource "aws_iam_role" "cw_agent" {
-  name               = "${local.name}-cloudwatch-agent"
-  assume_role_policy = data.aws_iam_policy_document.pod_identity_trust.json
-}
-resource "aws_iam_role_policy_attachment" "cw_agent" {
-  role       = aws_iam_role.cw_agent.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
-}
-resource "aws_eks_pod_identity_association" "cw_agent" {
-  cluster_name    = module.eks.cluster_name
-  namespace       = "amazon-cloudwatch"
-  service_account = "cloudwatch-agent"
-  role_arn        = aws_iam_role.cw_agent.arn
-}
-```
-```hcl
-# modules/eks addons 에
-amazon-cloudwatch-observability = {}
-```
-→ CloudWatch 콘솔 → Container Insights → 클러스터/노드/파드 대시보드, Logs 에 `/aws/containerinsights/point-dev-eks/application`.
+## 로그 (생략한 부분)
+- 이번엔 `kubectl logs` 로 충분했다 (9~12단계의 문제 원인을 전부 로그에서 찾음).
+- 운영 설계대로 하려면 A 안의 `amazon-cloudwatch-observability` 애드온 (Fluent Bit 포함) 또는 Loki 를 추가한다:
+  ```hcl
+  # envs/dev/cloudwatch.tf — Pod Identity 패턴
+  resource "aws_iam_role" "cw_agent" {
+    name               = "${local.name}-cloudwatch-agent"
+    assume_role_policy = data.aws_iam_policy_document.pod_identity_trust.json
+  }
+  resource "aws_iam_role_policy_attachment" "cw_agent" {
+    role       = aws_iam_role.cw_agent.name
+    policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+  }
+  resource "aws_eks_pod_identity_association" "cw_agent" {
+    cluster_name    = module.eks.cluster_name
+    namespace       = "amazon-cloudwatch"
+    service_account = "cloudwatch-agent"
+    role_arn        = aws_iam_role.cw_agent.arn
+  }
+  # modules/eks addons 에: amazon-cloudwatch-observability = {}
+  ```
+  💸 Container Insights 는 관측 대상 수·로그 GB 로 과금. **로그 그룹은 애드온을 지워도 남는다** → 수동 삭제.
 
-💸 ⚠️ Container Insights(enhanced observability)는 관측 대상 수에 따라 과금되고, 로그 수집량(GB)도 과금된다. 하루 실습이면 소액이지만 **끄는 걸 잊지 말 것**. 로그 그룹은 애드온을 지워도 **남는다** → 수동 삭제.
-
----
-
-## ✅ 확인
-10단계 부하 테스트를 다시 돌리면서:
-- 파드 수 그래프가 1 → N 으로 계단처럼 오르고
-- 노드 수가 뒤따라 오르고
-- CPU 가 60% 근처에서 HPA 가 반응하고
-- p95 응답시간이 확장 직후 튀었다가 안정되는 모습
-
-스크린샷을 `docs/log/12-observability.md` 에 첨부하고, 10단계 표의 시간들을 그래프로 교차 확인.
+## 자주 막히는 곳
+| 증상 | 원인 / 해결 |
+|---|---|
+| 앱 타겟이 Prometheus 에 없음 | `serviceMonitorSelectorNilUsesHelmValues: false`, Service 의 `app` 라벨, 포트 이름 `http` |
+| `kube_node_labels` 에 `label_workload` 없음 | kube-state-metrics `metricLabelsAllowlist` |
+| `histogram_quantile` 결과 없음 | 히스토그램 비활성 → `..._PERCENTILESHISTOGRAM_...=true` |
+| 앱 기동 실패 `to double[] ... "true"` | 환경변수 이름에 `PERCENTILES_HISTOGRAM` (하이픈 자리 `_`) → `PERCENTILESHISTOGRAM` (문제 ②) |
+| Grafana 로그인 실패 | Secret 값 끝 줄바꿈 (`--from-file`) (문제 ①) |
+| kubeEtcd / scheduler 타겟 DOWN | EKS 는 수집 불가 → values 에서 끔 |
+| Application `metadata.annotations: Too long` | `ServerSideApply=true` |
+| 대시보드가 안 보임 | ConfigMap 라벨 `grafana_dashboard: "1"`, 사이드카 `searchNamespace` |
 
 ## 🧹 정리
+ArgoCD 가 관리하므로 11단계 정리 순서를 따른다 (root → Application 제거 → 리소스 정리). monitoring 만 따로 지운다면:
 ```bash
-helm uninstall kps -n monitoring
-kubectl delete crd -l app.kubernetes.io/part-of=kube-prometheus-stack   # ⚠️ 확인: 라벨. CRD 는 helm uninstall 로 안 지워짐
-# Container Insights 를 썼다면
-aws logs describe-log-groups --log-group-name-prefix /aws/containerinsights/point-dev-eks --query 'logGroups[].logGroupName'
-aws logs delete-log-group --log-group-name <각 그룹>
+kubectl delete application monitoring -n argocd            # finalizer 없음 → 리소스는 남음 (11단계 정리 참고)
+helm template kps prometheus-community/kube-prometheus-stack --version 93.9.0 -n monitoring \
+  -f k8s/platform/monitoring/values.yaml | kubectl delete -f - --ignore-not-found
+kubectl delete ns monitoring
+kubectl get crd -o name | grep monitoring.coreos.com | xargs kubectl delete     # CRD 는 별도로 남는다
 ```
-클러스터째 destroy 하면 Helm 리소스는 함께 사라지지만, **CloudWatch 로그 그룹은 남는다.**
+클러스터째 `terraform destroy` 하면 전부 사라진다 (EBS 를 쓰지 않으므로 잔여 볼륨 없음 — Prometheus·Grafana 모두 emptyDir).
+`~/.config/point-dev/grafana_admin_password` 는 다음에 재사용하거나 삭제.
