@@ -9,18 +9,22 @@ resources:
   - gateway.yaml
   - scaledobject.yaml              # 10단계
   - db-init.yaml                  # 11단계 (ArgoCD PreSync hook)
+  - servicemonitor.yaml           # 12단계
+  - gitops-prune-test.yaml
 configMapGenerator:
   - name: monolith-config
     literals:
       - SPRING_PROFILES_ACTIVE=local          # 데모 시드 (9단계 문서 "달라진 점")
       - KAFKA_BOOTSTRAP=point-kafka-bootstrap.kafka.svc:9092
       - AUTH_COOKIE_SECURE=false              # ALB 가 HTTP 라 Secure 쿠키 불가
+      - MANAGEMENT_METRICS_DISTRIBUTION_PERCENTILES_HISTOGRAM_HTTP_SERVER_REQUESTS=true   # 12단계: p95 계산용 버킷
   - name: event-config
     literals:
       - SPRING_PROFILES_ACTIVE=local          # evt-local 자동 생성
       - REDIS_HOST=point-dev-redis.uigepd.0001.apn2.cache.amazonaws.com
       - REDIS_PORT=6379
       - KAFKA_BOOTSTRAP=point-kafka-bootstrap.kafka.svc:9092
+      - MANAGEMENT_METRICS_DISTRIBUTION_PERCENTILES_HISTOGRAM_HTTP_SERVER_REQUESTS=true   # 12단계: p95 계산용 버킷
       # JWT_PUBLIC_KEY(Secret) 가 있으면 local 의 jwk-set-uri 보다 우선 (SecurityConfig)
 images:
   - name: monolith

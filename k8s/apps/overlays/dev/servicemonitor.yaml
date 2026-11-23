@@ -1,0 +1,13 @@
+# 12단계 — Prometheus 가 /actuator/prometheus 를 15초마다 수집 (web 은 지표 없음)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: point-backend
+spec:
+  selector:
+    matchExpressions:
+      - { key: app, operator: In, values: [monolith, event-service] }
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s

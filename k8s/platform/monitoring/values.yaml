@@ -1,0 +1,28 @@
+# kube-prometheus-stack 93.9.0 (operator v0.95.2) — ArgoCD Application k8s/argocd/apps/monitoring.yaml 가 사용
+prometheus:
+  prometheusSpec:
+    retention: 1d                                 # 실습
+    resources:
+      requests: { cpu: 200m, memory: 1Gi }
+      limits:   { memory: 1536Mi }
+    # 모든 namespace 의 ServiceMonitor/PodMonitor 를 release 라벨 상관없이 수집
+    # (없으면 release: kps 라벨이 붙은 것만 봄 → 앱 지표가 안 잡히는 가장 흔한 원인)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+alertmanager:
+  enabled: false                                  # 실습: 알람 생략
+grafana:
+  admin:
+    existingSecret: grafana-admin                 # Git 에 비밀번호를 두지 않음 → 12-1 에서 kubectl 로 직접 생성
+  sidecar:
+    dashboards:
+      searchNamespace: ALL                        # grafana_dashboard=1 라벨 ConfigMap 을 모든 ns 에서
+kube-state-metrics:
+  # 노드 라벨 중 이것만 kube_node_labels 로 노출 → Karpenter 노드 수를 셀 수 있다
+  metricLabelsAllowlist:
+    - nodes=[workload,karpenter.sh/capacity-type,node.kubernetes.io/instance-type]
+# EKS 컨트롤플레인은 AWS 관리 → 수집 불가. 켜 두면 타겟이 항상 DOWN + 알람
+kubeEtcd: { enabled: false }
+kubeControllerManager: { enabled: false }
+kubeScheduler: { enabled: false }
+kubeProxy: { enabled: false }                     # EKS kube-proxy 는 metrics 를 127.0.0.1 에만 열어 둠
