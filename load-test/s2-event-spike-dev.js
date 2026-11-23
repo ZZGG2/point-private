@@ -16,9 +16,10 @@ export const options = {
       timeUnit: '1s',
       preAllocatedVUs: 200,
       maxVUs: 1000,
+      // RATE / HOLD 로 조절 가능 (tests/run.sh --heavy 는 짧게 씀). 기본 300 RPS 5분
       stages: [
-        { target: 300, duration: '30s' },
-        { target: 300, duration: '5m' },
+        { target: Number(__ENV.RATE || 300), duration: '30s' },
+        { target: Number(__ENV.RATE || 300), duration: __ENV.HOLD || '5m' },
         { target: 0, duration: '30s' },
       ],
     },

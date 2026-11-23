@@ -18,6 +18,7 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | 10 | [10-karpenter-keda.md](10-karpenter-keda.md) | Spot NodePool, ScaledObject, 부하 테스트·확장 시간 측정 |
 | 11 | [11-argocd.md](11-argocd.md) | Terraform 으로 ArgoCD + root, App of Apps, 수동 설치분 이전, db-init PreSync Job |
 | 12 | [12-observability.md](12-observability.md) | kube-prometheus-stack (ArgoCD) + ServiceMonitor + 대시보드 ConfigMap |
+| 13 | [13-tests.md](13-tests.md) | `tests/run.sh` — 0~12단계 전체 검증 스위트 (≈340개 검사, E2E·부하·selfHeal 포함) |
 
 > **0~5단계, 7~12단계**는 실제로 진행한 결과를 반영했고, 6단계는 진행 전에 미리 쓴 가이드다.
 > 그 문서들의 "⚠️ 확인" 표시는 버전·필드명 등 진행 시점에 검증해야 하는 부분 → 실습하면서 고쳐 둘 것.
@@ -29,7 +30,7 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 1. `bootstrap/` `terraform apply` (state 버킷 — 같은 이름으로 재생성)
 2. `envs/dev/` `terraform init` → `terraform apply` (VPC + EKS + LBC IAM, ≈ 20분)
 3. `aws eks update-kubeconfig --name point-dev-eks --region ap-northeast-2`
-4. 5단계: CRD 설치 → `values.yaml` 의 **vpcId 갱신** → Helm 설치 → `kubectl apply -f k8s/smoke/`
+4. 5단계: CRD 설치 → `values.yaml` 의 **vpcId 갱신** → Helm 설치 → (선택) `kubectl apply -f k8s/smoke/` — smoke 는 11월 23일에 지웠다, 확인용으로만
 5. 내 공인 IP 가 바뀌었으면 `terraform.tfvars` 의 `my_ip_cidr` 와 `30-gateway.yaml` 의 `sourceRanges` 수정
 6. (6단계 이후) ECR 은 `force_delete` 로 이미지째 삭제됨 → 이미지 다시 빌드·푸시
 7. (7단계 이후) RDS·Redis 는 `envs/dev` apply 에 포함. Strimzi Helm 설치 → `kubectl apply -f k8s/platform/kafka/kafka.yaml` → `app_rw` 다시 생성 (7-6, 비밀번호 파일 `~/.config/point-dev/app_rw_password` 재사용. **public 스키마 GRANT 포함**)
@@ -41,6 +42,7 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
     - 순서상 Terraform 밖에 남는 것: Gateway API CRD (5단계, ArgoCD 전에 `kubectl apply`), Secrets Manager 비밀 2개 (8-1), `monitoring/grafana-admin` Secret (12-1)
     - 7-6 `app_rw` 는 db-init PreSync Job 이 대신한다
 12. (12단계 이후) Grafana: `kubectl port-forward -n monitoring svc/kps-grafana 3000:80` → 대시보드 "point — 이벤트 확장"
+13. **마지막으로 `tests/run.sh`** — 전부 PASS 면 복구 완료 ([13 문서](13-tests.md))
 
 ## 이 실습에서 고정한 버전 (2026-11-20 ~ 11-23 기준)
 

@@ -14,3 +14,5 @@ kubeconfig*
 # 기타
 .env
 .DS_Store
+# 테스트 리포트 (엔드포인트 등 환경 정보 포함)
+tests/reports/
