@@ -1,0 +1,35 @@
+# replicas 는 일부러 적지 않는다 → 기본 1, 10단계부터 KEDA(HPA) 가 관리
+# nodeSelector/tolerations 도 없음 → 10단계 overlay 패치로 Karpenter 노드에 보냄
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: event-service
+  labels: { app: event-service }
+spec:
+  selector:
+    matchLabels: { app: event-service }
+  template:
+    metadata:
+      labels: { app: event-service }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001 }
+      containers:
+        - name: event-service
+          image: event-service
+          ports: [{ containerPort: 8081 }]
+          envFrom:
+            - configMapRef: { name: event-config }
+            - secretRef: { name: event-secrets }      # JWT_PUBLIC_KEY
+          resources:
+            requests: { cpu: 250m, memory: 768Mi }    # KEDA CPU 트리거가 이 requests 기준으로 % 계산
+            limits:   { memory: 1Gi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8081 }
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+          lifecycle:
+            preStop: { exec: { command: ["sleep", "10"] } }

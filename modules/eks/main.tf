@@ -26,6 +26,7 @@ module "eks" {
     eks-pod-identity-agent = { before_compute = true }
     kube-proxy             = {}
     coredns                = {}
+    metrics-server         = {} # 10단계: HPA/KEDA CPU 트리거, kubectl top
   }
 
   eks_managed_node_groups = {

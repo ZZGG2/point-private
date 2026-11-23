@@ -216,10 +216,12 @@ spec:
                 END IF;
               END \$do\$;
               GRANT CONNECT, CREATE ON DATABASE point TO app_rw;
+              GRANT USAGE, CREATE ON SCHEMA public TO app_rw;
               SQL
 ```
 - **`$$` 를 쓰지 않는다.** 쿠버네티스는 `args`/`command`/`env` 값의 `$$` 를 `$` 로 바꾼다 → PostgreSQL `DO $$` 가 깨짐 (7단계에서 실제로 겪음). 이름 붙은 달러 인용 `$do$` 사용.
 - SQL 은 7단계 7-6 에서 손으로 실행한 것과 같다 (ELSE 로 비밀번호 갱신까지 → 여러 번 실행해도 안전).
+- `SCHEMA public` 권한도 필수 — PG15+ 는 public 스키마 CREATE 가 기본으로 없다 (9단계에서 Flyway 가 실패했던 원인).
 
 ⚠️ 확인: ESO 정책에 RDS 마스터 비밀 ARN(`rds!db-*`) 읽기 권한을 추가해야 함, 멱등성(여러 번 실행해도 OK) 확인.
 

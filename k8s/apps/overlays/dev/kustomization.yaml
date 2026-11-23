@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: point
+resources:
+  - ../../base/monolith
+  - ../../base/event-service
+  - ../../base/web
+  - external-secrets.yaml
+  - gateway.yaml
+  - scaledobject.yaml              # 10단계
+configMapGenerator:
+  - name: monolith-config
+    literals:
+      - SPRING_PROFILES_ACTIVE=local          # 데모 시드 (9단계 문서 "달라진 점")
+      - KAFKA_BOOTSTRAP=point-kafka-bootstrap.kafka.svc:9092
+      - AUTH_COOKIE_SECURE=false              # ALB 가 HTTP 라 Secure 쿠키 불가
+  - name: event-config
+    literals:
+      - SPRING_PROFILES_ACTIVE=local          # evt-local 자동 생성
+      - REDIS_HOST=point-dev-redis.uigepd.0001.apn2.cache.amazonaws.com
+      - REDIS_PORT=6379
+      - KAFKA_BOOTSTRAP=point-kafka-bootstrap.kafka.svc:9092
+      # JWT_PUBLIC_KEY(Secret) 가 있으면 local 의 jwk-set-uri 보다 우선 (SecurityConfig)
+images:
+  - name: monolith
+    newName: 822837196792.dkr.ecr.ap-northeast-2.amazonaws.com/point/monolith
+    newTag: v0.1.0
+  - name: event-service
+    newName: 822837196792.dkr.ecr.ap-northeast-2.amazonaws.com/point/event-service
+    newTag: v0.1.0
+  - name: web
+    newName: 822837196792.dkr.ecr.ap-northeast-2.amazonaws.com/point/web
+    newTag: v0.1.0
+# 10단계: event-service 를 Karpenter NodePool "event" 노드로
+# (base 에 replicas 를 안 적었으므로 KEDA/HPA 가 바꾼 파드 수를 apply 가 되돌리지 않는다)
+patches:
+  - target: { kind: Deployment, name: event-service }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/nodeSelector
+        value: { workload: event }
+      - op: add
+        path: /spec/template/spec/tolerations
+        value: [{ key: workload, value: event, effect: NoSchedule }]

@@ -1,0 +1,2 @@
+# helm install keda kedacore/keda --version 2.21.1 -n keda --create-namespace -f values.yaml
+# 실습: 기본값 그대로 (operator / metrics-apiserver / admission-webhooks 각 1개)

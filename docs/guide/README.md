@@ -19,7 +19,7 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | 11 | [11-argocd.md](11-argocd.md) | Terraform 으로 ArgoCD + root, App of Apps, 수동 설치분 이전 |
 | 12 | [12-observability.md](12-observability.md) | kube-prometheus-stack + ServiceMonitor (또는 Container Insights) |
 
-> **0~5단계, 7단계**는 실제로 진행한 결과를 반영했고, 나머지(6, 8~12)는 진행 전에 미리 쓴 가이드다.
+> **0~5단계, 7~10단계**는 실제로 진행한 결과를 반영했고, 나머지(6, 11~12)는 진행 전에 미리 쓴 가이드다.
 > 그 문서들의 "⚠️ 확인" 표시는 버전·필드명 등 진행 시점에 검증해야 하는 부분 → 실습하면서 고쳐 둘 것.
 >
 > 특히 **9단계부터는 ROADMAP 과 다르다**: point-backend 가 `X-User-Id` 헤더 대신 JWT 인증으로 바뀌었고,
@@ -32,7 +32,10 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 4. 5단계: CRD 설치 → `values.yaml` 의 **vpcId 갱신** → Helm 설치 → `kubectl apply -f k8s/smoke/`
 5. 내 공인 IP 가 바뀌었으면 `terraform.tfvars` 의 `my_ip_cidr` 와 `30-gateway.yaml` 의 `sourceRanges` 수정
 6. (6단계 이후) ECR 은 `force_delete` 로 이미지째 삭제됨 → 이미지 다시 빌드·푸시
-7. (7단계 이후) RDS·Redis 는 `envs/dev` apply 에 포함. Strimzi Helm 설치 → `kubectl apply -f k8s/platform/kafka/kafka.yaml` → `app_rw` 다시 생성 (7-6, 비밀번호 파일 `~/.config/point-dev/app_rw_password` 재사용)
+7. (7단계 이후) RDS·Redis 는 `envs/dev` apply 에 포함. Strimzi Helm 설치 → `kubectl apply -f k8s/platform/kafka/kafka.yaml` → `app_rw` 다시 생성 (7-6, 비밀번호 파일 `~/.config/point-dev/app_rw_password` 재사용. **public 스키마 GRANT 포함**)
+8. (8단계 이후) ESO IAM 은 `envs/dev` apply 에 포함. Secrets Manager 비밀 2개 다시 생성 (8-1 — RDS 엔드포인트가 바뀌므로 JSON 새로 만들기) → ESO Helm → `cluster-secret-store.yaml`
+9. (9단계 이후) `overlays/dev/kustomization.yaml` 의 `REDIS_HOST`, `gateway.yaml` 의 `sourceRanges` 확인 → `kubectl apply -f k8s/platform/gateway/gatewayclass.yaml` → `kubectl apply -k k8s/apps/overlays/dev`
+10. (10단계 이후) Karpenter IAM·SQS·metrics-server 는 `envs/dev` apply 에 포함. Karpenter Helm (`k8s/platform/karpenter/values.yaml`) → `nodepool-event.yaml` → KEDA Helm. ScaledObject 의 cron 시각은 그날 관찰할 시각으로
 
 ## 이 실습에서 고정한 버전 (2026-11-20 ~ 11-23 기준)
 
@@ -51,10 +54,18 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | RDS PostgreSQL | 16.15 (`db.t4g.micro`) | SSL 강제 (`sslmode=require`) |
 | ElastiCache Redis | 7.1.0 (`cache.t4g.micro`) | |
 | Strimzi | 1.3.1 → Kafka 4.3.2 (KRaft) | CRD 는 **`kafka.strimzi.io/v1`** 만 제공 (`v1beta2` 아님) |
+| External Secrets Operator | 2.15.0 (chart 2.15.0) | API `external-secrets.io/v1` |
+| point 이미지 | `v0.1.0` (linux/amd64) | 9단계 `SPRING_PROFILES_ACTIVE=local` |
+| Karpenter | 1.15.3 (OCI chart) | K8s 1.37 은 **1.15.x 만** 지원 (호환표). EKS 모듈 `//modules/karpenter` 21.30.2 |
+| metrics-server | EKS 애드온 v0.9.1 | `modules/eks` `addons` |
+| KEDA | 2.21.1 (chart 2.21.1) | |
+| k6 | v2.4.0 (docker `grafana/k6`) | |
 
 ## 공통 규칙
 - 리전 `ap-northeast-2` 고정, 모든 리소스 태그 `project=point-platform, env=dev, managed-by=terraform` (provider `default_tags`)
 - `*.tfstate`, `*.tfvars`, `kubeconfig*` 는 커밋하지 않는다 (`.gitignore`)
 - 새 `module` 블록을 추가하면 **`envs/dev` 에서 `terraform init`** (모듈 폴더 안에서 init 하지 않기)
 - 쿠버네티스 `command`/`args`/`env` 값의 `$$` 는 `$` 로 바뀐다 → SQL 달러 인용은 `$do$` 사용
+- 비밀값은 Git·state 에 두지 않는다 → Secrets Manager (CLI 로 생성) → ESO → K8s Secret
+- Karpenter 가 만든 EC2 는 **Terraform state 에 없다** → destroy 전에 NodePool 부터 지운다 (10 문서 정리)
 - 하루 실습이 끝나면 **역순 정리** → [05 문서의 정리 순서](05-lbc-gateway.md#정리-순서-중요) + ROADMAP 맨 아래

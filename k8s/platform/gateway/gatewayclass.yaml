@@ -1,0 +1,7 @@
+# 클러스터 전역 리소스 → 앱 overlay(namespace: point) 에 넣지 않는다
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: aws-alb
+spec:
+  controllerName: gateway.k8s.aws/alb

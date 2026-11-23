@@ -1,0 +1,27 @@
+# KEDA 가 HPA(keda-hpa-event-service) 를 만들고 관리. 트리거 여러 개 → 가장 큰 값 채택
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: event-service
+spec:
+  scaleTargetRef:
+    name: event-service
+  minReplicaCount: 1
+  maxReplicaCount: 20                # 실습 상한 (point-infra 는 100)
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:   { stabilizationWindowSeconds: 0 }
+        scaleDown: { stabilizationWindowSeconds: 300 }
+  triggers:
+    # 이벤트 사전 확장: 실습에선 "지금부터 몇 분 뒤" 로 바꿔서 관찰 (분 시 * * *)
+    - type: cron
+      metadata:
+        timezone: Asia/Seoul
+        start: "53 13 * * *"
+        end: "00 14 * * *"
+        desiredReplicas: "8"
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "60"                  # requests.cpu(250m) 의 60%

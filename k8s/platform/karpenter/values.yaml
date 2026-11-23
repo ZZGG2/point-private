@@ -1,0 +1,9 @@
+# helm install karpenter oci://public.ecr.aws/karpenter/karpenter --version 1.15.3 -n kube-system -f values.yaml
+settings:
+  clusterName: point-dev-eks
+  interruptionQueue: Karpenter-point-dev-eks   # terraform output -raw karpenter_queue_name
+replicas: 1                                    # 실습: core 노드 2대 용량 절약 (운영은 기본값 2 = HA)
+controller:
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { memory: 512Mi }

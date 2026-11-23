@@ -346,13 +346,17 @@ END \$do\$;"
 kubectl run pg-init -n default --restart=Never --image=postgres:16 \
   --env PGPASSWORD="$MASTER_PW" --env SQL="$SQL" --command -- \
   sh -c 'psql "host='"$RDS"' user=point_admin dbname=point sslmode=require" -v ON_ERROR_STOP=1 \
-         -c "$SQL" -c "GRANT CONNECT, CREATE ON DATABASE point TO app_rw;"'
+         -c "$SQL" -c "GRANT CONNECT, CREATE ON DATABASE point TO app_rw;" \
+            -c "GRANT USAGE, CREATE ON SCHEMA public TO app_rw;"'
 
 kubectl wait pod/pg-init --for=jsonpath='{.status.phase}'=Succeeded --timeout=60s
-kubectl logs pg-init          # DO / GRANT
+kubectl logs pg-init          # DO / GRANT / GRANT
 kubectl delete pod pg-init
 ```
-- `GRANT CREATE ON DATABASE` — monolith 의 Flyway 가 스키마(`users` 등)를 직접 만들기 때문에 필요.
+- `GRANT CREATE ON DATABASE` — 새 스키마를 만들 수 있는 권한.
+- `GRANT USAGE, CREATE ON SCHEMA public` — **public 스키마 안에 테이블을 만드는 권한.** monolith 의 Flyway 가 `public` 에 테이블을 만든다.
+  PostgreSQL 15 부터 `public` 스키마의 CREATE 가 PUBLIC 에서 회수됐다 → 이게 없으면 9단계 monolith 가
+  `ERROR: permission denied for schema public` 으로 CrashLoopBackOff (9단계에서 실제로 겪음. 처음엔 DATABASE 권한만 줬었다).
 - 비밀번호를 `--env` 로 넘기면 파드 spec 에 남는다 → 끝나면 바로 파드 삭제. 운영은 Secret 참조로 (11단계).
 
 ### 팁 — `kubectl run -i --rm` 대신 "실행 → wait → logs"
@@ -371,7 +375,7 @@ REDIS=$(terraform output -raw redis_endpoint)
 # 1) app_rw 접속 + CREATE 권한
 run pg-app --image=postgres:16 --env PGPASSWORD="$APP_PW" --command -- \
   psql "host=$RDS user=app_rw dbname=point sslmode=require" \
-  -c "select current_user, has_database_privilege('point','CREATE') as can_create;"
+  -c "select current_user, has_database_privilege('point','CREATE') as can_create, has_schema_privilege('public','CREATE') as can_create_public;"
 
 # 2) SSL 없이 접속하면 거부되는지 (Failed 가 정상)
 run pg-nossl --image=postgres:16 --env PGPASSWORD="$APP_PW" --command -- \
@@ -407,6 +411,7 @@ run kc --image=apache/kafka:3.8.0 --command -- sh -c \
 | psql 타임아웃 | RDS SG 인바운드가 노드 SG 인지, 파드가 노드 SG 를 쓰는지 |
 | `no pg_hba.conf entry ... no encryption` | `sslmode=require` |
 | `permission denied for database` (Flyway) | `GRANT CREATE ON DATABASE point TO app_rw` 누락 |
+| `permission denied for schema public` (Flyway) | PG15+ → `GRANT USAGE, CREATE ON SCHEMA public TO app_rw` 누락 |
 | Kafka 파드 Pending | 노드 메모리 부족 → 노드 추가 |
 | `InvalidParameterCombination` (RDS) | 인스턴스 클래스와 엔진 버전 조합 미지원 → `describe-orderable-db-instance-options` |
 

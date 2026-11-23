@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: monolith
+  labels: { app: monolith }
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels: { app: monolith }
+  template:
+    metadata:
+      labels: { app: monolith }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001 }
+      containers:
+        - name: monolith
+          image: monolith            # overlay 의 images 로 치환
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: monolith-config }
+            - secretRef: { name: monolith-db }      # 8단계 ESO 가 생성
+          resources:
+            requests: { cpu: 250m, memory: 768Mi }
+            limits:   { memory: 1Gi }
+          startupProbe:                              # Flyway + Spring 기동이 길어도 liveness 가 죽이지 않게
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+            periodSeconds: 5
+            failureThreshold: 36                     # 최대 3분
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8080 }
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+          lifecycle:
+            preStop: { exec: { command: ["sleep", "10"] } }   # ALB 타겟 해제 전에 트래픽 끊기지 않게
