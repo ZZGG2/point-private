@@ -31,7 +31,7 @@ images:
     newTag: v0.1.0
   - name: web
     newName: 822837196792.dkr.ecr.ap-northeast-2.amazonaws.com/point/web
-    newTag: v0.1.0
+    newTag: v0.1.1
 # 10단계: event-service 를 Karpenter NodePool "event" 노드로
 # (base 에 replicas 를 안 적었으므로 KEDA/HPA 가 바꾼 파드 수를 apply 가 되돌리지 않는다)
 patches:
