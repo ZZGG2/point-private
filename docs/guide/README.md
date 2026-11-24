@@ -19,6 +19,7 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | 11 | [11-argocd.md](11-argocd.md) | Terraform 으로 ArgoCD + root, App of Apps, 수동 설치분 이전, db-init PreSync Job |
 | 12 | [12-observability.md](12-observability.md) | kube-prometheus-stack (ArgoCD) + ServiceMonitor + 대시보드 ConfigMap |
 | 13 | [13-tests.md](13-tests.md) | `tests/run.sh` — 0~12단계 전체 검증 스위트 (≈340개 검사, E2E·부하·selfHeal 포함) |
+| 14 | [14-manual-tests.md](14-manual-tests.md) | 13단계 검사를 손으로 하나씩 — 명령별 통과 기준, 2026-11-24 클러스터 덮어쓰기 주의점, 정리 순서 |
 
 > **0~5단계, 7~12단계**는 실제로 진행한 결과를 반영했고, 6단계는 진행 전에 미리 쓴 가이드다.
 > 그 문서들의 "⚠️ 확인" 표시는 버전·필드명 등 진행 시점에 검증해야 하는 부분 → 실습하면서 고쳐 둘 것.
