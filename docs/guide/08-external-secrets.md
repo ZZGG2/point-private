@@ -20,7 +20,7 @@ AWS Secrets Manager                       EKS
 | monolith | `DB_URL` | `jdbc:postgresql://<rds>:5432/point?sslmode=require` |
 | | `DB_USERNAME` / `DB_PASSWORD` | `app_rw` / 7단계에서 만든 비밀번호 |
 | | `JWT_PRIVATE_KEY` | RS256 서명 키 (PKCS#8 PEM). **local 프로필이 아니면 없을 때 기동 실패**. 파드가 2개 이상이면 반드시 같은 키여야 함 |
-| | `ADMIN_API_TOKEN` | `/api/admin/**` 용 (`X-Admin-Token`). ⚠️ local 프로필에서는 이 이름으론 안 먹는다 → 9단계 overlay 에서 `APP_ADMIN_APITOKEN` 으로도 넣음 ([9단계 문제 ②](09-point-app.md#문제--관리자-토큰이-local-admin-token-으로-고정)) |
+| | `ADMIN_API_TOKEN` | `/api/admin/**` 용 (`X-Admin-Token`). ⚠️ local 프로필에서는 이 이름으론 안 먹는다 → 9단계 overlay 에서 `APP_ADMIN_APITOKEN` 으로도 넣음 ([9단계 문제 ②](09-point-app.md#문제--관리자-토큰이-local-admin-token-으로-고정)) | — 🔄 11-24 정산 API 제거(ADR-0018)로 **지금은 앱이 쓰지 않는다** (비밀·ExternalSecret 매핑은 남겨 둠, 무해)
 | event-service | `JWT_PUBLIC_KEY` | 위 키의 공개키 (X.509 PEM). `JWT_JWK_SET_URI` 와 둘 중 하나 필수, 둘 다 있으면 **공개키 우선** (`SecurityConfig`) |
 
 Secret 이름 `monolith-db`, ClusterSecretStore 이름 `aws-sm` (point-infra 설계 그대로).

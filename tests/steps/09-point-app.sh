@@ -41,9 +41,8 @@ eq "GET /api/points/balance 토큰 없음 → 401 (monolith)" "$(http_code "http
 eq "POST /api/events/.../answers 토큰 없음 → 401 (event-service)" "$(http_code -X POST "http://$ALB/api/events/evt-local/answers" -H 'Content-Type: application/json' -d '{"answer":"A"}')" "401"
 eq "위조 토큰 → 401" "$(http_code "http://$ALB/api/points/balance" -H 'Authorization: Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.AAAA')" "401"
 eq "잘못된 비밀번호 로그인 → 401" "$(http_code -X POST "http://$ALB/api/auth/login" -H 'Content-Type: application/json' -d '{"email":"demo1@point.local","password":"wrong"}')" "401"
-eq "관리자 API 잘못된 토큰 → 403" "$(http_code "http://$ALB/api/admin/events/evt-local/settlement" -H 'X-Admin-Token: local-admin-token')" "403"
-ADMIN=$(kubectl get secret monolith-db -n point -o jsonpath='{.data.ADMIN_API_TOKEN}' | base64 -d)
-eq "관리자 API Secret 토큰 → 200" "$(http_code "http://$ALB/api/admin/events/evt-local/settlement" -H "X-Admin-Token: $ADMIN")" "200"
+# 일괄 정산 API 는 제거됐다 (point-infra ADR-0018). /api/admin/** 는 공통 SecurityConfig 에 공개 경로로 남아 있어 401 이 아니라 404
+eq "정산 API 제거됨 (/api/admin/** → 404)" "$(http_code "http://$ALB/api/admin/events/evt-local/settlement")" "404"
 
 # 로그인 / JWT
 HDRS=$(curl -s --max-time 10 -D - -o /tmp/point-tests-login.json -X POST "http://$ALB/api/auth/login" -H 'Content-Type: application/json' -d '{"email":"demo1@point.local","password":"demo1234!"}')
@@ -60,7 +59,7 @@ match "demo1 잔액 조회" "$(curl -s --max-time 10 "http://$ALB/api/points/bal
 CODES=$(for i in $(seq 1 10); do http_code "http://$ALB/api/points/balance" -H "Authorization: Bearer $T1"; echo; done | sort | uniq -c | tr -s ' ' | tr '\n' ' ')
 eq "같은 토큰 10회 → 전부 200 (monolith 2파드 키 공유)" "$CODES" " 10 200 "
 
-# E2E: 테스트 전용 이벤트 (stock 2, 100P) → 당첨 → Kafka → 정산 대기 → 정산 → 잔액
+# E2E: 테스트 전용 이벤트 (stock 2, 100P) → 당첨 → Kafka → 원장 즉시 반영 → 잔액 (ADR-0018)
 if [ "${E2E:-1}" != 1 ]; then skip "E2E 시나리오" "--no-e2e"; return; fi
 EV="evt-test-$(date +%m%d%H%M%S)"; info "E2E 이벤트 $EV (데이터 변경: demo2·3 잔액 +100P)"
 bal() { curl -s --max-time 10 "http://$ALB/api/points/balance" -H "Authorization: Bearer $1" | jq -r .data.balance; }
@@ -77,16 +76,15 @@ eq "demo3 참여 → 202 당첨" "$(ans "$T3")" "202"
 eq "demo4 참여 → 200 낙첨 (재고 소진)" "$(ans "$T4")" "200"
 ST=$(curl -s --max-time 10 "http://$ALB/api/events/$EV/status" | jq -c '.data | {participants,winners,remainingStock}')
 eq "이벤트 상태" "$ST" '{"participants":3,"winners":2,"remainingStock":0}'
-P=""; for i in $(seq 1 30); do P=$(curl -s --max-time 5 "http://$ALB/api/admin/events/$EV/settlement" -H "X-Admin-Token: $ADMIN" | jq -r '.data.pendingCount // 0'); [ "$P" = 2 ] && break; sleep 1; done
+# 당첨 → Kafka → monolith consumer → 원장. 별도 정산 없이 자동으로 잔액에 반영돼야 한다
+N2=""; N3=""; for i in $(seq 1 30); do N2=$(bal "$T2"); N3=$(bal "$T3"); [ "$N2" = "$((B2+100))" ] && [ "$N3" = "$((B3+100))" ] && break; sleep 1; done
 t1=$(date +%s%N)
-eq "Kafka → monolith 정산 대기 2건" "$P" "2"
-info "당첨 → 정산 대기 반영까지 $(( (t1-t0)/1000000 ))ms (HTTP 4회 포함)"
-eq "정산 전 잔액 변화 없음 (demo2)" "$(bal "$T2")" "$B2"
-SET=$(curl -s --max-time 15 -X POST "http://$ALB/api/admin/events/$EV/settlement" -H "X-Admin-Token: $ADMIN" -H 'Content-Type: application/json' -d '{"expectedCount":2}' | jq -c '.data | {rowCount,totalAmount,appliedNow}')
-eq "정산 실행" "$SET" '{"rowCount":2,"totalAmount":200,"appliedNow":2}'
-eq "demo2 잔액 +100" "$(bal "$T2")" "$((B2+100))"
-eq "demo3 잔액 +100" "$(bal "$T3")" "$((B3+100))"
+eq "demo2 잔액 +100 (자동 반영)" "$N2" "$((B2+100))"
+eq "demo3 잔액 +100 (자동 반영)" "$N3" "$((B3+100))"
+info "당첨 → 잔액 반영까지 $(( (t1-t0)/1000000 ))ms (HTTP 4회 포함)"
 eq "demo4 잔액 그대로 (낙첨)" "$(bal "$T4")" "$B4"
-RE=$(curl -s --max-time 15 -X POST "http://$ALB/api/admin/events/$EV/settlement" -H "X-Admin-Token: $ADMIN" -H 'Content-Type: application/json' -d '{"expectedCount":2}' | jq -c '.data | {appliedNow,repaired}')
-eq "재정산 → 중복 지급 없음 (멱등)" "$RE" '{"appliedNow":0,"repaired":true}'
-eq "정산 상태 COMPLETE, 미반영 0" "$(curl -s --max-time 10 "http://$ALB/api/admin/events/$EV/settlement" -H "X-Admin-Token: $ADMIN" | jq -c '.data | {state,unappliedCount,ledgerCount}')" '{"state":"COMPLETE","unappliedCount":0,"ledgerCount":2}'
+# 멱등: 이벤트당 원장 1건. 잠시 뒤에도 잔액이 더 늘지 않는다 (재전달돼도 idempotency_key 로 1회만)
+hist() { curl -s --max-time 10 "http://$ALB/api/points/history" -H "Authorization: Bearer $1" | jq --arg ev "$EV" '[.data[] | select(.referenceId == $ev)] | length'; }
+eq "demo2 원장에 이 이벤트 1건" "$(hist "$T2")" "1"
+sleep 3
+eq "3초 뒤에도 demo2 잔액 +100 (중복 지급 없음)" "$(bal "$T2")" "$((B2+100))"

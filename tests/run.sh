@@ -4,7 +4,7 @@
 #   tests/run.sh                 # 0~12단계 전부 (기본: 읽기 전용 + 가벼운 E2E)
 #   tests/run.sh 07 09           # 특정 단계만
 #   tests/run.sh --heavy         # + 무거운 실험 (부하 → HPA/Karpenter 확장, ArgoCD selfHeal)
-#   tests/run.sh --no-e2e        # 9단계 E2E(테스트 이벤트 생성·정산 → demo2·3 잔액 +100) 생략
+#   tests/run.sh --no-e2e        # 9단계 E2E(테스트 이벤트 생성·당첨 → demo2·3 잔액 +100 자동 반영) 생략
 #   tests/run.sh --report FILE   # 리포트 경로 지정 (기본 tests/reports/report-<시각>.md)
 #
 # 종료 코드: FAIL 이 하나라도 있으면 1

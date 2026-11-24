@@ -1,7 +1,7 @@
 # 9단계. point 앱 배포 (monolith, event-service, web)
 
 ## 목표
-LOCAL-DEV.md 의 데모 시나리오(퀴즈 당첨 → Kafka → 정산 → 원장 반영)를 **EKS + ALB** 에서 재현한다.
+LOCAL-DEV.md 의 데모 시나리오(퀴즈 당첨 → Kafka → 원장 반영)를 **EKS + ALB** 에서 재현한다.
 
 ```
 인터넷(내 IP) → ALB (Gateway point-gw)
@@ -12,12 +12,16 @@ LOCAL-DEV.md 의 데모 시나리오(퀴즈 당첨 → Kafka → 정산 → 원�
 
 > 2026-11-23 실제로 진행한 결과를 반영한 문서.
 
+> 🔄 **2026-11-24 변경 — 일괄 정산 제거 (point-infra ADR-0018).** 퀴즈 당첨도 출석처럼 Kafka → monolith 가 **원장에 바로 반영**한다 (1~2초).
+> 관리자 정산 API(`/api/admin/events/{id}/settlement`)와 `X-Admin-Token` 은 없어졌다 → 아래 "달라진 점 3", "문제 ②", 실제 결과의 정산 행은 **11-23 당시 기록**이다.
+> 이미지 `monolith`·`web` **v0.1.2** 부터 적용 (11-24 클러스터에서만 덮어씀: point-dev Application `spec.source.kustomize.images` — Git overlay 태그는 v0.1.0/v0.1.1 그대로).
+
 ## ⚠️ ROADMAP 과 달라진 점 (point-backend 현재 코드 기준)
 1. **`X-User-Id` 헤더 인증은 없어졌다.** 지금은 JWT(RS256)다. monolith `/api/auth/login` 으로 토큰을 받아 `Authorization: Bearer` 로 호출한다.
 2. **데모 데이터와 데모 이벤트는 `local` 프로필에서만** 생긴다.
    - monolith: `db/local` Flyway 시드 (demo1~5@point.local / `demo1234!`, user 1 = 1,000P)
    - event-service: `LocalEventAdminController` (`@Profile("local")`) — 기동 시 `evt-local` 생성 (재고 3), `/api/events/{id}/open`, `/status`
-3. **당첨이 바로 잔액에 들어가지 않는다 — 정산 단계가 생겼다.** monolith 는 Kafka 메시지를 받으면 `reward staged for settlement` (대기 행)만 만들고,
+3. ~~**당첨이 바로 잔액에 들어가지 않는다 — 정산 단계가 생겼다.**~~ (11-24 ADR-0018 로 철회 — 지금은 바로 들어간다) monolith 는 Kafka 메시지를 받으면 `reward staged for settlement` (대기 행)만 만들고,
    관리자 API `POST /api/admin/events/{id}/settlement` 를 호출해야 원장에 반영된다 (point-backend `Makefile` 의 `make settle`).
 
 → **실습에서는 `SPRING_PROFILES_ACTIVE=local` 로 띄우고, 접속 정보·JWT 키는 환경변수(8단계 Secret)로 덮어쓴다.**
@@ -271,18 +275,14 @@ curl -s http://$ALB/api/events/evt-local/status | jq -c .data
 answer $TOKEN; answer $TOKEN
 for u in 2 3 4; do answer $(login demo$u@point.local); done
 
-# 4) 아직 잔액 1,000P — monolith 로그에 "reward staged for settlement" (정산 대기)
-kubectl logs -n point -l app=monolith --since=5m | grep 'reward staged'
-
-# 5) 정산 (관리자 API) → 잔액 반영
-ADMIN=$(kubectl get secret monolith-db -n point -o jsonpath='{.data.ADMIN_API_TOKEN}' | base64 -d)
-W=$(curl -s http://$ALB/api/events/evt-local/status | jq .data.winners)
-curl -s -X POST http://$ALB/api/admin/events/evt-local/settlement -H "X-Admin-Token: $ADMIN" \
-  -H 'Content-Type: application/json' -d "{\"expectedCount\":$W}" | jq -c .data
+# 4) 1~2초 뒤 잔액 1,500P — Kafka 경유 자동 반영 (ADR-0018, v0.1.2~)
+sleep 2
 curl -s http://$ALB/api/points/balance -H "Authorization: Bearer $TOKEN" | jq -c .data     # 1500
+kubectl logs -n point -l app=monolith --since=5m | grep 'reward applied'                   # reason=QUIZ_REWARD
+curl -s http://$ALB/api/points/history -H "Authorization: Bearer $TOKEN" | jq -c '.data[0]'  # EARN 500, referenceId evt-local
 ```
 
-### 실제 결과
+### 실제 결과 (2026-11-23, 일괄 정산 버전 v0.1.0 — 정산 행은 지금과 다름)
 | 확인 | 결과 |
 |---|---|
 | 로그인 | access token 발급 (monolith, Secret 의 개인키로 서명) |
@@ -297,7 +297,7 @@ curl -s http://$ALB/api/points/balance -H "Authorization: Bearer $TOKEN" | jq -c
 | `/` | `<title>Point Platform</title>`, `/admin` → 200 (SPA 라우팅) |
 | `/actuator/health` | web 의 index.html (앱 actuator 비노출) |
 
-### 문제 ② — 관리자 토큰이 `local-admin-token` 으로 고정
+### 문제 ② — 관리자 토큰이 `local-admin-token` 으로 고정 (11-24 정산 API 제거로 지금은 해당 없음)
 처음엔 Secret 의 `ADMIN_API_TOKEN` 으로 정산 API 를 부르면 **403**, `local-admin-token` 이면 200 이었다.
 - 원인: Spring 설정 우선순위.
   - `application.yml`: `app.admin.api-token: ${ADMIN_API_TOKEN:}` ← 환경변수는 이 **자리표시자**에만 들어감
@@ -318,7 +318,7 @@ curl -s http://$ALB/api/points/balance -H "Authorization: Bearer $TOKEN" | jq -c
   sleep 20; kubectl logs kc; kubectl delete pod kc
   ```
 - 8단계 **회전 실험**은 이 시점(앱이 떠 있을 때)에 진행 → [08 문서](08-external-secrets.md#회전-실험-9단계-앱을-띄운-뒤-진행).
-- 이벤트를 처음부터 다시: `kubectl rollout restart -n point deploy/event-service` (evt-local 재생성). 원장/정산 데이터는 RDS 에 남는다.
+- 이벤트를 처음부터 다시: `kubectl rollout restart -n point deploy/event-service` (evt-local 재생성). 원장 데이터는 RDS 에 남는다.
 
 ## 자주 막히는 곳
 | 증상 | 원인 / 해결 |
@@ -328,8 +328,7 @@ curl -s http://$ALB/api/points/balance -H "Authorization: Bearer $TOKEN" | jq -c
 | `FATAL: no pg_hba.conf entry ... no encryption` | `DB_URL` 에 `?sslmode=require` 누락 |
 | `JWT_PRIVATE_KEY ... 설정되지 않았습니다` | Secret 키 이름 / ESO 동기화 상태 |
 | event-service 401 | 토큰 서명 키 불일치 — monolith 개인키와 event 공개키가 같은 쌍인지 |
-| 당첨인데 잔액 안 바뀜 | **정상** — 정산 API 호출 필요. 그래도 안 되면 monolith 로그 `reward staged`, Kafka bootstrap |
-| 정산 API 403 | 관리자 토큰 — local 프로필이면 `APP_ADMIN_APITOKEN` 필요 (문제 ②) |
+| 당첨인데 잔액 안 바뀜 | monolith 로그 `reward applied` 가 있는지 → 없으면 Kafka bootstrap / consumer group LAG. 로그에 `reward staged` 가 보이면 **예전 이미지(v0.1.0, 일괄 정산)** |
 | ALB 503 | target-health unhealthy → readiness 경로/startupProbe 시간 |
 | 파드 Pending | 노드 용량 부족 → `kubectl describe pod` Events |
 | `ImagePullBackOff` | overlay `images.newName`/`newTag` 오타 |
