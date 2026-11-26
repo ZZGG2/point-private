@@ -28,7 +28,7 @@ module "eks" {
 
 module "ecr" {
   source       = "../../modules/ecr"
-  repositories = ["point/monolith", "point/event-service", "point/web"]
+  repositories = ["point/core-service", "point/event-service", "point/web"]
 }
 
 module "rds" {

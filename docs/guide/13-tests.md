@@ -37,14 +37,14 @@ tests/
 | 03 EKS | ACTIVE·1.37·인증모드 API, 엔드포인트 허용 CIDR = 내 IP (현재 IP 와도 비교), 애드온 5개 ACTIVE, 노드그룹 3/4/3·ON_DEMAND·health, kubectl 버전 차 ≤1, 노드 Ready, max pods 110(prefix delegation), DaemonSet, metrics API, **노드 SG 규칙**, 앱 포트 ≥1025, 비정상/재시작 많은 파드 |
 | 04 smoke | (smoke 를 지웠으면 SKIP) probe·resources, 같은 노드 / 다른 노드에서 파드 접속 |
 | 05 LBC | 2/2·v3.6.3, Pod Identity, values vpcId = 실제 VPC, Gateway API CRD v1.6.0, GatewayClass Accepted, error 로그, (smoke) ALB 200·SG |
-| 06 ECR | IMMUTABLE·scan on push·lifecycle, v0.1.0 이미지·CRITICAL 취약점, **overlay 가 쓰는 태그가 ECR 에 있는지**, ImagePullBackOff 0 |
-| 07 데이터 | RDS 16.15·비공개·암호화·Secrets Manager 비밀번호·`rds.force_ssl=1`·SG = 노드 SG:5432 만, Redis 7.1·SG, **클러스터 안에서** app_rw 접속(DB·public 스키마 CREATE 권한, SSL 여부), SSL 없는 접속 거부, Flyway 이력, Redis PING, Kafka Ready·4.3.2·토픽, **consumer group LAG 0** |
-| 08 ESO | Secrets Manager 비밀·키, **IAM 정책 시뮬레이터로 허용/거부 4건**, ESO 3개·v2.15.0, ClusterSecretStore·ExternalSecret 3개 Synced, Secret 키·DB_URL·`APP_ADMIN_APITOKEN`, K8s 값 == Secrets Manager 값(해시), **JWT 개인키 ↔ 공개키 같은 쌍**·PKCS#8·2048 |
+| 06 ECR | IMMUTABLE·scan on push·lifecycle, `point/{core-service,event-service,web}` `v0.2.0`(`IMG_TAG`) 이미지·CRITICAL 취약점, **overlay 가 쓰는 태그가 ECR 에 있는지**, ImagePullBackOff 0 |
+| 07 데이터 | RDS 16.15·비공개·암호화·Secrets Manager 비밀번호·`rds.force_ssl=1`·SG = 노드 SG:5432 만, **Valkey 복제 그룹**(engine valkey·노드 2·자동 장애 조치·Multi-AZ·Cluster mode 꺼짐·서로 다른 AZ·SG = 노드 SG:6379·output = primary 엔드포인트), **클러스터 안에서** app_rw 접속(DB·public 스키마 CREATE 권한, SSL 여부), SSL 없는 접속 거부, Flyway 이력, PING·`valkey_version` 7.2·role master + replica 1, **원장 반영 Stream**(`reward:streams` 등록·모든 Stream 에 group `point-ledger`·pending/lag 합계 0·DLQ 0) — 11-26 Kafka 검사 삭제 |
+| 08 ESO | Secrets Manager 비밀·키, **IAM 정책 시뮬레이터로 허용/거부 4건**, ESO 3개·v2.15.0, ClusterSecretStore·ExternalSecret 3개 Synced, Secret 키(`core-service-db`, event-secrets 의 `ADMIN_API_TOKEN`)·DB_URL, K8s 값 == Secrets Manager 값(해시), **JWT 개인키 ↔ 공개키 같은 쌍**·PKCS#8·2048 |
 | 09 앱 | Deployment 3개, local 프로필·기동, runAsNonRoot·startupProbe, Gateway·HTTPRoute, 타겟그룹 3개 healthy, ALB SG, **라우팅 3분기**, actuator 비노출, 401(무토큰·위조토큰·틀린 비번)·403(틀린 관리자 토큰), JWT RS256·iss·15분, 쿠키 Secure 없음·HttpOnly, 같은 토큰 10회(파드 2개 키 공유) |
-| 09 E2E | 테스트 전용 이벤트 `evt-test-<시각>` (재고 2, 100P): 열기 전 410 → 202 → 409 → 202 → 200(낙첨) → 상태 → **Kafka 경유 잔액 +100 자동 반영** → 낙첨자 불변 → **원장 이벤트당 1건·3초 뒤에도 불변 (멱등)**. 정산 API 404 (제거됨, ADR-0018) |
+| 09 E2E | 이벤트 생성 API 403(토큰 없음·틀림), **운영용 생성 API** 로 테스트 이벤트 `evt-test-<시각>` (재고 2, 100P, 30분 마감) → 같은 id 409, 열기 전 410 → 202 → 409 → 202 → 200(낙첨) → 상태 → **Redis Stream 경유 잔액 +100 자동 반영** → 낙첨자 불변 → **원장 이벤트당 1건·3초 뒤에도 불변 (멱등)**. 정산 API 404 (제거됨, ADR-0018). core-service `reward stream read failed` 로그 없음 |
 | 10 확장 | SQS·EventBridge 5·노드 Access Entry·Spot SLR·Pod Identity, Karpenter 1.15.3·core 노드에 위치·ERROR 로그, NodePool(limits·taint)·EC2NodeClass(서브넷 3·SG·AMI), event 노드 = NodeClaim = EC2(고아 0), event 노드엔 event-service 만, Git 에 replicas 없음, KEDA·APIService, ScaledObject·HPA(1/20, CPU 수집) / `--heavy`: **250 RPS × 90초 → HPA·노드 확장** |
 | 11 ArgoCD | 컴포넌트·v3.6.2, Helm 릴리스 = Terraform 소유 2개, Application 9개 각각 Synced/Healthy·automated·에러 없음, Git 최신 커밋, **`argocd app diff` 8개 = 0**, db-init Complete·PreSync·로그, 마스터 비밀은 앱 파드가 참조 안 함 / `--heavy`: **selfHeal** |
-| 12 관측성 | 컴포넌트, node-exporter 전 노드, Alertmanager 꺼짐, retention, ServiceMonitor, DOWN 타겟 0, 타겟 수 = 파드 수, 히스토그램·p95·JVM·Kafka·노드 라벨·HPA·cAdvisor 지표, Grafana 비밀번호(줄바꿈 없음)·무인증 401·로그인·데이터소스 health·대시보드 6패널 **각 쿼리에 데이터** |
+| 12 관측성 | 컴포넌트, node-exporter 전 노드, Alertmanager 꺼짐, retention, ServiceMonitor, DOWN 타겟 0, 타겟 수 = 파드 수, 히스토그램·p95·JVM·Lettuce(Stream 소비, 11-26 Kafka 대신)·노드 라벨·HPA·cAdvisor 지표, Grafana 비밀번호(줄바꿈 없음)·무인증 401·로그인·데이터소스 health·대시보드 6패널 **각 쿼리에 데이터** |
 | 99 비용 | EC2·ALB·NAT·RDS·Redis·비밀 현황, 미연결 EBS·EIP 0, **Gateway 없는 고아 ALB·ALB 보안그룹** 0, 떠 있으면 과금 경고 |
 
 ## 실행 결과 (2026-11-23 15:31, `--heavy`)
@@ -59,7 +59,7 @@ tests/
 | **WARN (발견)** | **Data 서브넷이 App 라우트 테이블(→NAT)을 공유** — 아래 발견 ①, 이후 수정 |
 | `--heavy` 확장 | k6 29,999 req, p95 48ms, 실패 0 / HPA 1 → 9 (첫 증가 48초) / NodeClaim 1 → 3 |
 | `--heavy` selfHeal | `kubectl scale web` → 1초 만에 Git 값(2) |
-| E2E | 당첨 → Kafka → 정산 대기 반영 327ms, 정산 후 잔액 +100, 재정산 멱등 (11-23 일괄 정산 버전 — 11-24 부터는 즉시 반영 검사) |
+| E2E | 당첨 → Kafka → 정산 대기 반영 327ms, 정산 후 잔액 +100, 재정산 멱등 (11-23 일괄 정산·Kafka 버전 — 11-24 부터 즉시 반영, 11-26 부터 Redis Stream 검사) |
 
 ### 테스트로 새로 드러난 것
 **① Data 서브넷에 인터넷 경로가 있다 (2단계 설계와 다름) → ✅ 2026-11-23 16:08 수정함**

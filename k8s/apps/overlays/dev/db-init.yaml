@@ -24,8 +24,8 @@ spec:
     # ⚠️ RDS 를 다시 만들면 이름이 바뀐다 → terraform output rds_master_secret_arn 의 이름 부분으로 갱신
     - { secretKey: username, remoteRef: { key: "rds!db-c87681e3-0e2c-4778-853d-de393fe35e35", property: username } }
     - { secretKey: password, remoteRef: { key: "rds!db-c87681e3-0e2c-4778-853d-de393fe35e35", property: password } }
-    - { secretKey: DB_URL,      remoteRef: { key: point-dev/monolith, property: DB_URL } }
-    - { secretKey: DB_PASSWORD, remoteRef: { key: point-dev/monolith, property: DB_PASSWORD } }
+    - { secretKey: DB_URL,      remoteRef: { key: point-dev/core-service, property: DB_URL } }
+    - { secretKey: DB_PASSWORD, remoteRef: { key: point-dev/core-service, property: DB_PASSWORD } }
 ---
 apiVersion: batch/v1
 kind: Job

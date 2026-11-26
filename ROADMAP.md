@@ -11,6 +11,15 @@
 > - Terraform/GitOps 분리: `../point-infra/docs/02-adr/0009-terraform-gitops-split.md`
 > - 비용: `../point-infra/docs/05-operations/finops.md`
 > - 참고 코드: `../point-infra/infra/terraform/` (vpc, eks 모듈은 초안 있음)
+> - 원장 반영 (Kafka 제거): `../point-infra/docs/02-adr/0019-redis-stream-ledger-sync.md`, 데이터 저장소: `../point-infra/docs/01-architecture/data-architecture.md`
+>
+> 🔄 **2026-11-26 point-infra 설계 변경 반영**
+> - **Kafka(MSK·Strimzi) 제거 (ADR-0019).** 원장 반영은 ElastiCache 의 **Redis Stream** (event-service 가 Lua 판정과 함께 `XADD` → core-service 가 consumer group `point-ledger` 로 읽음)
+> - ElastiCache 는 **Valkey 7.2, Primary + Replica, Multi-AZ + 자동 장애 조치** (Stream 이 원장 반영 버퍼라 1노드면 장애 시 미반영 당첨이 사라진다)
+> - **monolith → core-service** (모듈·이미지·k8s 리소스 이름). 아키텍처(모듈러 모놀리스)는 그대로
+> - 운영용 이벤트 생성 API `POST /api/events/admin/{id}` (`X-Admin-Token`, event-service) — 토큰은 core-service 가 아니라 event-service 비밀에
+> - point-backend 는 Spring Boot 4.1 (ADR-0021) → 이미지를 `v0.2.0` 으로 다시 빌드
+> - 각 단계 문서의 "실제 결과" 표 중 날짜가 11-26 이전인 것은 **당시(Kafka·monolith) 기록**이다
 
 ---
 
@@ -25,9 +34,9 @@
 | 4 | 테스트 앱 배포 (kubectl) | `k8s/smoke/` | 동일 |
 | 5 | AWS Load Balancer Controller + Gateway API | 외부에서 접속 | + ALB ≈ $0.03 |
 | 6 | ECR + 실제 point 이미지 올리기 | `modules/ecr` | ≈ 0 |
-| 7 | 데이터 계층 (RDS, Redis, Kafka) | `modules/rds` 등 | + DB/캐시 |
+| 7 | 데이터 계층 (RDS, ElastiCache Valkey) | `modules/rds` 등 | + DB/캐시 |
 | 8 | Secret 관리 (External Secrets) | Secrets Manager 연동 | ≈ 0 |
-| 9 | point 앱 배포 (monolith, event-service, web) | 전체 흐름 동작 | 동일 |
+| 9 | point 앱 배포 (core-service, event-service, web) | 전체 흐름 동작 | 동일 |
 | 10 | Karpenter + KEDA (자동 확장) | 이벤트 피크 대응 | Spot 사용분 |
 | 11 | ArgoCD (GitOps) | Git push = 배포 | 동일 |
 | 12 | 관측성 (로그, 메트릭) | 대시보드 | 소량 |
@@ -138,7 +147,7 @@ point-eks/
 | VPC | `10.10.0.0/16` | | | |
 | Public | 10.10.0.0/24 | 10.10.1.0/24 | 10.10.2.0/24 | ALB, NAT |
 | Private-App | 10.10.32.0/19 | 10.10.64.0/19 | 10.10.96.0/19 | EKS 노드/파드 |
-| Private-Data | 10.10.128.0/24 | 10.10.129.0/24 | 10.10.130.0/24 | RDS, Redis, Kafka |
+| Private-Data | 10.10.128.0/24 | 10.10.129.0/24 | 10.10.130.0/24 | RDS, ElastiCache (Valkey) |
 
 할 일:
 1. `terraform-aws-modules/vpc/aws` 모듈 사용 (직접 다 짜는 것보다 실수 적음)
@@ -173,7 +182,7 @@ aws ec2 describe-subnets --filters Name=vpc-id,Values=<vpc-id> --query 'Subnets[
    | 엔드포인트 | public 허용 + **내 IP만** (`cluster_endpoint_public_access_cidrs`) | 학습 편의 + 최소 보안 |
    | 접근 권한 | `enable_cluster_creator_admin_permissions = true` (Access Entry 방식) | aws-auth ConfigMap 안 씀 |
    | 애드온 | vpc-cni(Prefix Delegation ON), coredns, kube-proxy, eks-pod-identity-agent | `before_compute = true` 로 노드보다 먼저 |
-   | 노드그룹 `core` | On-Demand, `t3.medium` 2대 (min 2 / max 3) | monolith 등 상시 워크로드 |
+   | 노드그룹 `core` | On-Demand, `t3.medium` 2대 (min 2 / max 3) | core-service 등 상시 워크로드 |
 3. apply는 **15~20분** 걸린다.
 
 ✅ **확인:**
@@ -222,29 +231,30 @@ kubectl get pods -A                # coredns, aws-node, kube-proxy Running
 **목표:** 실제 point 백엔드/프론트 이미지를 AWS에 올린다.
 
 할 일:
-1. ECR 레포 3개: `point/monolith`, `point/event-service`, `point/web` (Terraform, 수명주기 정책: 최근 10개만 유지)
+1. ECR 레포 3개: `point/core-service`, `point/event-service`, `point/web` (Terraform, 수명주기 정책: 최근 10개만 유지)
 2. 빌드 & 푸시:
    ```bash
    aws ecr get-login-password | docker login --username AWS --password-stdin <계정ID>.dkr.ecr.ap-northeast-2.amazonaws.com
-   docker build -t <ecr>/point/monolith:v0.1 ../point-backend -f ../point-backend/monolith/Dockerfile
-   docker push <ecr>/point/monolith:v0.1
+   docker build -t <ecr>/point/core-service:v0.2.0 ../point-backend -f ../point-backend/core-service/Dockerfile --build-arg MODULE=core-service
+   docker push <ecr>/point/core-service:v0.2.0
    ```
    (Dockerfile 위치·빌드 컨텍스트는 `point-backend` 기준으로 확인)
 3. 노드가 ECR을 당겨올 권한 확인 (노드 역할에 `AmazonEC2ContainerRegistryReadOnly`)
 
-✅ **확인:** `aws ecr list-images --repository-name point/monolith` 에 태그 존재.
+✅ **확인:** `aws ecr list-images --repository-name point/core-service` 에 태그 존재.
 
 ---
 
 ## 7단계. 데이터 계층
 
-**목표:** 로컬 docker-compose(Postgres 16 / Redis 7 / Kafka 3.8)를 AWS 관리형으로 바꾼다.
+**목표:** 로컬 docker-compose(Postgres 16 / Redis 7)를 AWS 관리형으로 바꾼다.
 
 | 로컬 | AWS | 학습용 최소 사양 | 비고 |
 |---|---|---|---|
 | postgres:16 | **RDS for PostgreSQL 16** (ADR-0013) | `db.t4g.micro`, 단일 AZ | 운영 설계는 Multi-AZ |
-| redis:7 | ElastiCache Redis | `cache.t4g.micro` 1노드 | |
-| kafka 3.8 | MSK **또는** 클러스터 내 Strimzi | — | MSK는 비싸다 → 학습은 Strimzi(파드) 권장 |
+| redis:7 | **ElastiCache Valkey 7.2** (복제 그룹) | `cache.t4g.micro` × 2 (primary + replica, Multi-AZ, 자동 장애 조치) | 이벤트 판정 + **원장 반영 Redis Stream** (ADR-0019). 이 부분은 학습용도 설계대로 |
+
+Kafka(MSK·Strimzi)는 쓰지 않는다 (ADR-0019 로 제거).
 
 할 일:
 1. Private-Data 서브넷에 배치, 보안그룹은 **EKS 노드 SG에서만** 5432/6379 허용
@@ -278,17 +288,19 @@ kubectl run -it --rm rc --image=redis:7-alpine -- redis-cli -h <redis-endpoint> 
 **목표:** LOCAL-DEV.md의 데모 시나리오를 EKS에서 그대로 재현한다.
 
 할 일:
-1. `../point-infra/k8s/base/{monolith,event-service}` 를 참고해 `k8s/apps/` 작성 (Kustomize: base + overlays/dev)
-2. 환경변수: DB/Redis/Kafka 엔드포인트, Secret 참조
-3. `HTTPRoute` 규칙: `/api/events` → event-service, `/api` → monolith, `/` → web
-4. monolith 기동 시 Flyway 마이그레이션 성공 확인
+1. `../point-infra/k8s/base/{core-service,event-service}` 를 참고해 `k8s/apps/` 작성 (Kustomize: base + overlays/dev)
+2. 환경변수: DB/Redis 엔드포인트 (**core-service 도 Redis 필요** — Stream 을 읽는다), Secret 참조
+3. `HTTPRoute` 규칙: `/api/events` → event-service, `/api` → core-service, `/` → web
+4. core-service 기동 시 Flyway 마이그레이션 성공 확인
 
 ✅ **확인 (LOCAL-DEV.md 4절 시나리오):**
 ```bash
-curl -H "X-User-Id: 1" http://<alb>/api/points/balance          # 1000P
+TOKEN=$(curl -s -X POST http://<alb>/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"demo1@point.local","password":"demo1234!"}' | jq -r .data.accessToken)   # X-User-Id 헤더는 없어졌다 (JWT)
+curl -H "Authorization: Bearer $TOKEN" http://<alb>/api/points/balance          # 1000P
 curl http://<alb>/api/events/evt-local/status
 ```
-브라우저에서 퀴즈 당첨 → 1~2초 뒤 잔액 1,500P (Kafka 비동기 반영)
+브라우저에서 퀴즈 당첨 → 1초 안팎 뒤 잔액 1,500P (Redis Stream 경유 비동기 반영)
 
 ---
 

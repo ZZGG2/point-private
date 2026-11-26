@@ -16,13 +16,13 @@ if pf_start monitoring svc/kps-kube-prometheus-stack-prometheus 19090:9090; then
   TG=$(curl -s --max-time 10 "$P/api/v1/targets?state=active")
   eq "Prometheus DOWN 타겟 0개" "$(echo "$TG" | jq '[.data.activeTargets[] | select(.health!="up")] | length')" "0"
   info "활성 타겟 $(echo "$TG" | jq '.data.activeTargets | length')개: $(echo "$TG" | jq -r '[.data.activeTargets[].labels.job] | group_by(.) | map("\(.[0])×\(length)") | join(" ")')"
-  NM=$(kubectl get pods -n point -l app=monolith --no-headers | wc -l); NE=$(kubectl get pods -n point -l app=event-service --field-selector=status.phase=Running --no-headers | wc -l)
-  eq "monolith 타겟 up 수 = 파드 수" "$(pq 'sum(up{namespace="point",job="monolith"})')" "$NM"
+  NM=$(kubectl get pods -n point -l app=core-service --no-headers | wc -l); NE=$(kubectl get pods -n point -l app=event-service --field-selector=status.phase=Running --no-headers | wc -l)
+  eq "core-service 타겟 up 수 = 파드 수" "$(pq 'sum(up{namespace="point",job="core-service"})')" "$NM"
   eq "event-service 타겟 up 수 = 파드 수" "$(pq 'sum(up{namespace="point",job="event-service"})')" "$NE"
   ge "http_server_requests 히스토그램 버킷 (p95 계산 가능)" "$(pq 'count(http_server_requests_seconds_bucket{namespace="point"})')" 10
   match "event-service p95 계산됨 (최근 5분, 초)" "$(pq 'histogram_quantile(0.95, sum by (le) (rate(http_server_requests_seconds_bucket{namespace="point",service="event-service"}[5m])))')" '^[0-9.e+-]+$|^NaN$'
   ge "JVM 지표 수집 (jvm_memory_used_bytes 시리즈)" "$(pq 'count(jvm_memory_used_bytes{namespace="point"})')" 1
-  ge "Kafka consumer 지표 (monolith spring-kafka)" "$(pq 'count({namespace="point",__name__=~"kafka_consumer_.*"})')" 1
+  ge "Redis 클라이언트 지표 (core-service Lettuce — Stream 소비, ADR-0019)" "$(pq 'count({namespace="point",job="core-service",__name__=~"lettuce_.*"})')" 1
   eq "kube_node_labels{label_workload=event} = event 노드 수 (allowlist)" "$(pq 'count(kube_node_labels{label_workload="event"}) or vector(0)')" "$(kubectl get nodes -l workload=event --no-headers | wc -l)"
   ge "HPA 지표 (kube-state-metrics)" "$(pq 'count(kube_horizontalpodautoscaler_status_desired_replicas{namespace="point"})')" 1
   ge "컨테이너 CPU 지표 (cAdvisor)" "$(pq 'count(container_cpu_usage_seconds_total{namespace="point",container="event-service"})')" 1

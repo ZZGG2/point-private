@@ -1,4 +1,5 @@
-# 컨트롤러의 CRD 를 쓰는 플랫폼 리소스: GatewayClass, NodePool/EC2NodeClass, ClusterSecretStore, Kafka, Grafana 대시보드
+# 컨트롤러의 CRD 를 쓰는 플랫폼 리소스: GatewayClass, NodePool/EC2NodeClass, ClusterSecretStore, Grafana 대시보드
+# (Kafka 는 point-infra ADR-0019 로 제거 — 원장 반영은 ElastiCache Redis Stream)
 # k8s/platform 아래에는 Helm values.yaml 도 있으므로 include 로 매니페스트만 고른다
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -15,10 +16,10 @@ spec:
     path: k8s/platform
     directory:
       recurse: true
-      include: "{gateway/*.yaml,karpenter/nodepool-*.yaml,external-secrets/*.yaml,kafka/*.yaml,monitoring/dashboards/*.yaml}"
+      include: "{gateway/*.yaml,karpenter/nodepool-*.yaml,external-secrets/*.yaml,monitoring/dashboards/*.yaml}"
   destination:
     server: https://kubernetes.default.svc
-    namespace: kafka               # namespace 가 없는 리소스(Kafka, KafkaNodePool)의 기본값. 나머지는 클러스터 전역
+    namespace: default             # 전부 클러스터 전역이거나(GatewayClass 등) namespace 를 직접 적는다(대시보드 ConfigMap → monitoring)
   syncPolicy:
     automated: { prune: true, selfHeal: true }   # 11-5: 수동 Sync 로 Diff 확인 후 켬
     syncOptions: [ServerSideApply=true]

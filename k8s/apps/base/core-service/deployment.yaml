@@ -1,26 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: monolith
-  labels: { app: monolith }
+  name: core-service
+  labels: { app: core-service }
 spec:
   replicas: 2
   strategy:
     rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
   selector:
-    matchLabels: { app: monolith }
+    matchLabels: { app: core-service }
   template:
     metadata:
-      labels: { app: monolith }
+      labels: { app: core-service }
     spec:
       securityContext: { runAsNonRoot: true, runAsUser: 10001 }
       containers:
-        - name: monolith
-          image: monolith            # overlay 의 images 로 치환
+        - name: core-service
+          image: core-service            # overlay 의 images 로 치환
           ports: [{ containerPort: 8080 }]
           envFrom:
-            - configMapRef: { name: monolith-config }
-            - secretRef: { name: monolith-db }      # 8단계 ESO 가 생성
+            - configMapRef: { name: core-service-config }
+            - secretRef: { name: core-service-db }      # 8단계 ESO 가 생성
           resources:
             requests: { cpu: 250m, memory: 768Mi }
             limits:   { memory: 1Gi }

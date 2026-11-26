@@ -1,7 +1,10 @@
 # 6단계. ECR + point 이미지 올리기
 
 ## 목표
-point 백엔드 2개(monolith, event-service)와 프론트(web) 이미지를 ECR 에 올리고, 클러스터 노드가 당겨올 수 있는지 확인한다.
+point 백엔드 2개(core-service, event-service)와 프론트(web) 이미지를 ECR 에 올리고, 클러스터 노드가 당겨올 수 있는지 확인한다.
+
+> 🔄 **2026-11-26 변경** — 모듈 이름 `monolith` → **`core-service`** (point-backend #6), Spring Boot 4.1 (ADR-0021), Kafka 제거 (ADR-0019).
+> ECR 레포 이름이 `point/core-service` 로 바뀌고, 세 이미지 모두 **`v0.2.0`** 으로 다시 빌드한다. 아래 "실제 결과"·확인 기록 중 `monolith`·`v0.1.x` 는 당시 기록.
 
 > 이 문서는 5단계까지 진행한 뒤 **아직 실습하지 않은 상태에서** 작성한 가이드다.
 > "⚠️ 확인" 표시는 진행할 때 실제 값/동작을 확인하고 이 문서를 고쳐 둘 곳.
@@ -14,7 +17,7 @@ point 백엔드 2개(monolith, event-service)와 프론트(web) 이미지를 ECR
 
 **`modules/ecr/variables.tf`**
 ```hcl
-variable "repositories" { type = set(string) }   # ["point/monolith", "point/event-service", "point/web"]
+variable "repositories" { type = set(string) }   # ["point/core-service", "point/event-service", "point/web"]
 variable "keep_last" {
   type    = number
   default = 10
@@ -73,7 +76,7 @@ output "repository_urls" {
 ```hcl
 module "ecr" {
   source       = "../../modules/ecr"
-  repositories = ["point/monolith", "point/event-service", "point/web"]
+  repositories = ["point/core-service", "point/event-service", "point/web"]
 }
 ```
 `envs/dev/outputs.tf` 에 추가:
@@ -91,10 +94,10 @@ terraform output ecr_repository_urls
 ## 6-3. 빌드 & 푸시
 
 ### Dockerfile 구조 확인 (point-backend)
-- `monolith/Dockerfile`, `event-service/Dockerfile` 은 **빌드 컨텍스트가 `point-backend` 루트**다 (`COPY . .` 후 `./gradlew :${MODULE}:bootJar`).
-- `ARG MODULE` 로 어떤 모듈을 빌드할지 받는다 → `--build-arg MODULE=monolith` 필수.
+- `core-service/Dockerfile`, `event-service/Dockerfile` 은 **빌드 컨텍스트가 `point-backend` 루트**다 (`COPY . .` 후 `./gradlew :${MODULE}:bootJar`).
+- `ARG MODULE` 로 어떤 모듈을 빌드할지 받는다 → `--build-arg MODULE=core-service` 필수.
 - 런타임: `eclipse-temurin:21-jre`, uid 10001(non-root), `-XX:MaxRAMPercentage=75` (컨테이너 메모리 limit 의 75% 를 힙으로).
-- 포트: monolith 8080, event-service 8081.
+- 포트: core-service 8080, event-service 8081.
 
 ### point-frontend
 - `Dockerfile` 은 `node:20-alpine` 빌드 → `nginxinc/nginx-unprivileged:1.27-alpine` 런타임, 포트 **8080**, `/healthz` 헬스체크 경로.
@@ -104,18 +107,18 @@ terraform output ecr_repository_urls
 ```bash
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 REG=$ACCOUNT.dkr.ecr.ap-northeast-2.amazonaws.com
-TAG=v0.1.0            # IMMUTABLE 이므로 다시 올릴 땐 v0.1.1 등 새 태그 (git short sha 도 좋음)
+TAG=v0.2.0            # IMMUTABLE 이므로 다시 올릴 땐 새 태그 (git short sha 도 좋음). v0.1.x = monolith·Kafka 시절
 
 aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin $REG
 
 cd ~/point/point-backend
-docker build -f monolith/Dockerfile      --build-arg MODULE=monolith      -t $REG/point/monolith:$TAG .
+docker build -f core-service/Dockerfile  --build-arg MODULE=core-service  -t $REG/point/core-service:$TAG .
 docker build -f event-service/Dockerfile --build-arg MODULE=event-service -t $REG/point/event-service:$TAG .
 
 cd ~/point/point-frontend
 docker build -t $REG/point/web:$TAG .
 
-docker push $REG/point/monolith:$TAG
+docker push $REG/point/core-service:$TAG
 docker push $REG/point/event-service:$TAG
 docker push $REG/point/web:$TAG
 ```
@@ -136,8 +139,8 @@ aws iam list-attached-role-policies --role-name $NODE_ROLE --query 'AttachedPoli
 
 ## ✅ 확인
 ```bash
-aws ecr list-images --repository-name point/monolith
-aws ecr describe-image-scan-findings --repository-name point/monolith --image-id imageTag=$TAG \
+aws ecr list-images --repository-name point/core-service
+aws ecr describe-image-scan-findings --repository-name point/core-service --image-id imageTag=$TAG \
   --query 'imageScanFindings.findingSeverityCounts'
 
 # 클러스터에서 실제로 pull 되는지 (기동 실패해도 OK — Pulled 이벤트만 보면 됨)

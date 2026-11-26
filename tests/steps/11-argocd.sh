@@ -9,8 +9,8 @@ eq "Helm 릴리스 = Terraform 소유 2개만 (나머지는 ArgoCD 로 이전)" 
 
 HEAD=$(git -C "$REPO" rev-parse origin/master)
 APPS=$(kubectl get applications -n argocd -o json)
-EXPECT="aws-lbc external-secrets karpenter keda monitoring platform-config point-dev root strimzi"
-eq "Application 9개 (root + 하위 8)" "$(echo "$APPS" | jq -r '[.items[].metadata.name] | sort | join(" ")')" "$EXPECT"
+EXPECT="aws-lbc external-secrets karpenter keda monitoring platform-config point-dev root"
+eq "Application 8개 (root + 하위 7, strimzi 는 Kafka 제거로 삭제)" "$(echo "$APPS" | jq -r '[.items[].metadata.name] | sort | join(" ")')" "$EXPECT"
 for a in $EXPECT; do
   A=$(echo "$APPS" | jq --arg a "$a" '.items[] | select(.metadata.name==$a)')
   S="$(echo "$A" | jq -r '.status.sync.status')/$(echo "$A" | jq -r '.status.health.status')"
@@ -24,7 +24,7 @@ for a in root platform-config point-dev; do
 done
 if have argocd; then
   kubectl config set-context --current --namespace=argocd >/dev/null
-  for a in aws-lbc external-secrets karpenter keda strimzi monitoring platform-config point-dev; do
+  for a in aws-lbc external-secrets karpenter keda monitoring platform-config point-dev; do
     if argocd app diff "$a" --core --exit-code=false >/tmp/point-tests-diff.txt 2>&1; then
       NDIFF=$(grep -cE '^[<>] ' /tmp/point-tests-diff.txt); eq "argocd app diff $a: Git == 클러스터" "$NDIFF" "0"
     else ng "argocd app diff $a" "$(tail -1 /tmp/point-tests-diff.txt)"; fi
@@ -40,7 +40,7 @@ if [ -n "$J" ]; then
   eq "db-init 로그 DO/GRANT/GRANT" "$(kubectl logs -n point job/db-init 2>/dev/null | tr '\n' ' ')" "DO GRANT GRANT "
 else warn "db-init Job" "없음 (point-dev 가 아직 sync 되지 않음)"; fi
 check "db-master Secret 은 Job 용 namespace(point)에만" kubectl get secret db-master -n point
-for d in monolith event-service web; do
+for d in core-service event-service web; do
   REF=$(kubectl get deploy -n point $d -o json | jq -r '[.spec.template.spec.containers[].envFrom[]?.secretRef.name] | join(",")')
   nomatch "$d 파드는 마스터 비밀(db-master)을 참조하지 않음" "$REF" 'db-master'
 done

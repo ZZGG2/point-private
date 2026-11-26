@@ -39,8 +39,8 @@ done
 NSG=$(tfo node_security_group_id)
 NR=$(aws ec2 describe-security-group-rules --filters Name=group-id,Values="$NSG" --output json | jq -c '[.SecurityGroupRules[] | select((.IsEgress|not) and .ReferencedGroupInfo.GroupId=="'"$NSG"'") | "\(.IpProtocol):\(.FromPort)-\(.ToPort)"] | sort')
 eq "노드 SG: 노드 간 허용 = DNS 53 + 1025-65535" "$NR" '["tcp:1025-65535","tcp:53-53","udp:53-53"]'
-APP_PORTS=$(kubectl get pods -A -o json | jq -r '[.items[] | select(.metadata.namespace|test("^(point|kafka|monitoring|argocd|keda|external-secrets)$")) | select(.spec.hostNetwork|not) | .spec.containers[].ports[]?.containerPort | select(. < 1025)] | unique | join(",")')
-eq "앱 파드(point·kafka·모니터링 등) 컨테이너 포트 전부 ≥ 1025 (노드 간 통신 가능)" "${APP_PORTS:-없음}" "없음"
+APP_PORTS=$(kubectl get pods -A -o json | jq -r '[.items[] | select(.metadata.namespace|test("^(point|monitoring|argocd|keda|external-secrets)$")) | select(.spec.hostNetwork|not) | .spec.containers[].ports[]?.containerPort | select(. < 1025)] | unique | join(",")')
+eq "앱 파드(point·모니터링 등) 컨테이너 포트 전부 ≥ 1025 (노드 간 통신 가능)" "${APP_PORTS:-없음}" "없음"
 check_deploy kube-system coredns 2
 check_deploy kube-system metrics-server 1
 check "metrics API 동작 (kubectl top nodes)" kubectl top nodes

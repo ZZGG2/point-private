@@ -6,7 +6,7 @@ metadata:
 spec:
   selector:
     matchExpressions:
-      - { key: app, operator: In, values: [monolith, event-service] }
+      - { key: app, operator: In, values: [core-service, event-service] }
   endpoints:
     - port: http
       path: /actuator/prometheus

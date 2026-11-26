@@ -7,9 +7,16 @@ ADR-0009 의 경계:
 | Terraform 이 관리 | ArgoCD 가 관리 |
 |---|---|
 | VPC, EKS(+애드온), IAM(Pod Identity), RDS, ElastiCache, ECR, SQS | 클러스터 안의 모든 것 |
-| **ArgoCD 자체 + root Application 1개** | LB Controller, ESO, KEDA, Karpenter, Strimzi, 모니터링, 플랫폼 설정, point 앱 |
+| **ArgoCD 자체 + root Application 1개** | LB Controller, ESO, KEDA, Karpenter, 모니터링, 플랫폼 설정, point 앱 |
 
 > 2026-11-23 실제로 진행한 결과를 반영한 문서. ArgoCD **v3.6.2** (chart `argo-cd` 10.18.2), `argocd-apps` 2.0.8, helm provider **3.3.0**.
+
+> 🔄 **2026-11-26 변경** — Kafka 제거(ADR-0019)로 **`strimzi` Application 과 `k8s/platform/kafka/` 를 Git 에서 지웠다.** `platform-config` 의 include 에서 `kafka/*.yaml` 을 빼고 기본 namespace 를 `default` 로 바꿨다.
+> point-dev 는 monolith → core-service. 이 상태로 push 하면 (클러스터가 떠 있을 때):
+> - point-dev 안의 monolith Deployment·Service·ExternalSecret 은 `prune: true` 라 지워지고 core-service 가 새로 생긴다 → 이미지 `v0.2.0`·Secrets Manager `point-dev/core-service`·`REDIS_HOST` 를 **먼저** 준비할 것
+> - platform-config 는 Git 에서 빠진 `Kafka`·`KafkaNodePool` CR 을 prune 한다 (Strimzi operator 가 아직 떠 있으면 Kafka 파드도 정리됨)
+> - root 는 `strimzi` Application 을 지우지만, Application 에 `resources-finalizer.argocd.argoproj.io` 가 없어서 **Strimzi operator(Helm 리소스)는 남는다** → `kubectl get all -n kafka` 로 남은 것을 확인하고 `kubectl delete ns kafka` 로 정리 (CRD `*.kafka.strimzi.io` 도 남으면 `kubectl get crd -o name | grep strimzi.io | xargs kubectl delete`). 클러스터째 destroy 할 거면 생략
+> 아래 11-5 이전 절차·실제 결과는 11-23 당시(8개 하위 앱) 기록이다.
 
 ## 전체 구조 (App of Apps)
 ```
@@ -20,9 +27,8 @@ Terraform ── helm_release argocd        (envs/dev/argocd.tf)
                  ├─ external-secrets wave -2  Helm  external-secrets 2.15.0
                  ├─ keda             wave -2  Helm  kedacore/keda 2.21.1 + values 파일
                  ├─ karpenter        wave -2  Helm  OCI public.ecr.aws/karpenter 1.15.3 + values 파일
-                 ├─ strimzi          wave -2  Helm  strimzi-kafka-operator 1.3.1
                  ├─ monitoring       wave -2  Helm  kube-prometheus-stack 93.9.0 (12단계)
-                 ├─ platform-config  wave -1  Git   k8s/platform/{gateway,karpenter,external-secrets,kafka,monitoring/dashboards}
+                 ├─ platform-config  wave -1  Git   k8s/platform/{gateway,karpenter,external-secrets,monitoring/dashboards}
                  └─ point-dev        wave  1  Git   k8s/apps/overlays/dev (Kustomize) + db-init PreSync hook
 ```
 root 하나만 Terraform 이 만들고, 나머지는 **Git 의 YAML 이 Application 을 정의**한다 → 앱 추가 = YAML 추가 + push.
@@ -197,7 +203,7 @@ spec:
 | `external-secrets` | charts.external-secrets.io / 2.15.0 | cert-controller 가 CRD 변환 웹훅·검증 웹훅 caBundle 을 채움 → `ignoreDifferences` |
 | `keda` | kedacore / 2.21.1 | operator 가 APIService·웹훅 caBundle 을 채움 → `ignoreDifferences` |
 | `karpenter` | `public.ecr.aws/karpenter` (OCI) / 1.15.3 | repoURL 에 `oci://` 없이. argocd.tf 의 `enableOCI` 등록 필요 |
-| `strimzi` | strimzi.io/charts / 1.3.1 | |
+| ~~`strimzi`~~ | ~~strimzi.io/charts / 1.3.1~~ | 11-26 삭제 (ADR-0019) |
 | `monitoring` | prometheus-community / 93.9.0 | 12단계 |
 - **CRD 가 큰 차트는 `ServerSideApply=true`** — client-side apply 는 `last-applied-configuration` annotation 크기(256KB)를 넘을 수 있다.
 
@@ -207,7 +213,7 @@ spec:
     path: k8s/platform
     directory:
       recurse: true
-      include: "{gateway/*.yaml,karpenter/nodepool-*.yaml,external-secrets/*.yaml,kafka/*.yaml,monitoring/dashboards/*.yaml}"
+      include: "{gateway/*.yaml,karpenter/nodepool-*.yaml,external-secrets/*.yaml,monitoring/dashboards/*.yaml}"   # 11-26 kafka/*.yaml 제거
 ```
 **Kustomize** — [`point-dev.yaml`](../../k8s/argocd/apps/point-dev.yaml):
 ```yaml
@@ -285,8 +291,8 @@ spec:
   data:
     - { secretKey: username,    remoteRef: { key: "rds!db-<...>", property: username } }   # ⚠️ RDS 재생성 시 이름 바뀜
     - { secretKey: password,    remoteRef: { key: "rds!db-<...>", property: password } }
-    - { secretKey: DB_URL,      remoteRef: { key: point-dev/monolith, property: DB_URL } }
-    - { secretKey: DB_PASSWORD, remoteRef: { key: point-dev/monolith, property: DB_PASSWORD } }
+    - { secretKey: DB_URL,      remoteRef: { key: point-dev/core-service, property: DB_URL } }
+    - { secretKey: DB_PASSWORD, remoteRef: { key: point-dev/core-service, property: DB_PASSWORD } }
 ---
 apiVersion: batch/v1
 kind: Job
@@ -322,7 +328,7 @@ spec:
               GRANT USAGE, CREATE ON SCHEMA public TO app_rw;
               SQL
 ```
-- 앱 계정 비밀번호의 원본은 Secrets Manager `point-dev/monolith` 의 `DB_PASSWORD` 하나 → Job 과 앱이 같은 값을 쓴다.
+- 앱 계정 비밀번호의 원본은 Secrets Manager `point-dev/core-service` 의 `DB_PASSWORD` 하나 → Job 과 앱이 같은 값을 쓴다.
 - ESO 템플릿(sprig 함수)으로 `DB_URL` 에서 호스트만 뽑았다 → 엔드포인트를 Git 에 따로 적지 않아도 됨.
 - **`$$` 를 쓰지 않는다** (K8s 가 `$` 로 바꿈) → `$do$`. heredoc 의 `\$do\$` 는 shell 이 `$do$` 로, `$APP_PW` 는 값으로 바꾼다.
 - `PGSSLMODE=require` (RDS `rds.force_ssl`).

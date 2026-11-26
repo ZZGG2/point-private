@@ -8,7 +8,7 @@ EKS 가 올라갈 3-Tier 네트워크를 `point-infra` 설계(`network-design.md
 | VPC | `10.10.0.0/16` | | | |
 | Public | 10.10.0.0/24 | 10.10.1.0/24 | 10.10.2.0/24 | ALB, NAT |
 | Private-App | 10.10.32.0/19 | 10.10.64.0/19 | 10.10.96.0/19 | EKS 노드/파드 |
-| Private-Data | 10.10.128.0/24 | 10.10.129.0/24 | 10.10.130.0/24 | RDS, Redis, Kafka |
+| Private-Data | 10.10.128.0/24 | 10.10.129.0/24 | 10.10.130.0/24 | RDS, ElastiCache (Valkey) — Kafka 는 11-26 제거 |
 
 ## 2-0. AWS provider 를 6 으로 올리기
 3단계에서 쓸 **EKS 모듈 v21 이 AWS provider 6 이상을 요구**한다. 나중에 올리면 VPC 쪽도 다시 맞춰야 하므로 지금 올린다.

@@ -1,16 +1,19 @@
-# 7단계. 데이터 계층 (RDS, ElastiCache, Kafka)
+# 7단계. 데이터 계층 (RDS, ElastiCache Valkey)
 
 ## 목표
-로컬 docker-compose 의 Postgres 16 / Redis 7 / Kafka 3.8 을 AWS 로 옮긴다.
+로컬 docker-compose 의 Postgres 16 / Redis 7 을 AWS 로 옮긴다.
 
 | 로컬 | 실습 대상 | 사양 | 배치 |
 |---|---|---|---|
 | postgres:16 | **RDS for PostgreSQL 16.15** (ADR-0013) | `db.t4g.micro`(Graviton), 단일 AZ, gp3 20GB | Private-Data |
-| redis:7 | **ElastiCache Redis 7.1.0** | `cache.t4g.micro` 1노드 | Private-Data |
-| kafka 3.8 | **Strimzi 1.3.1 → Kafka 4.3.2** (클러스터 내 파드) | 브로커+컨트롤러 1개(KRaft), ephemeral | Private-App (EKS) |
+| redis:7 | **ElastiCache Valkey 7.2** (복제 그룹) | `cache.t4g.micro` × 2 — primary + replica, **Multi-AZ + 자동 장애 조치** | Private-Data |
 
-> MSK 는 최소 구성도 시간당 비용이 커서 학습엔 Strimzi 를 쓴다. 운영 설계(MSK)와 다른 점은 log 에 기록.
-> 이 문서는 **2026-11-23 실제 진행 결과**를 반영했다.
+> 🔄 **2026-11-26 변경 — Kafka 제거 (point-infra ADR-0019).** 원장 반영은 Kafka 대신 **ElastiCache 의 Redis Stream** 으로 한다.
+> - event-service 의 Lua 가 판정과 같은 스크립트에서 `XADD event:{id}:rewards` → core-service 가 consumer group `point-ledger` 로 읽어 원장에 반영 → `XACK`
+> - 그래서 ElastiCache 가 "캐시"가 아니라 **원장 반영 버퍼**가 됐다 → 1노드였던 Redis 를 point-infra 설계대로 **Valkey 복제 그룹(Multi-AZ)** 으로 바꿨다 (7-3)
+> - Strimzi Kafka(이전 7-5)는 삭제. 당시 진행 기록(Strimzi 1.3.1 → Kafka 4.3.2, `kafka.strimzi.io/v1` 문제 등)은 git 이력에 있다: `git log -p -- docs/guide/07-data.md`
+>
+> 이 문서는 **2026-11-23 실제 진행 결과**를 바탕으로 하고, 7-3·7-5 는 11-26 설계로 다시 썼다 (아직 AWS 에 적용 전).
 
 ## 사전 준비
 - `jq` 가 필요하다 (Secrets Manager JSON 파싱). WSL 에 없어서 공식 바이너리로 설치했다 (sudo 불필요):
@@ -20,13 +23,13 @@
   grep ' jq-linux-amd64$' sha256sum.txt | sha256sum --check
   install -m 0755 jq-linux-amd64 ~/.local/bin/jq && jq --version     # jq-1.7.1
   ```
-- 노드 용량: 7단계 시점(t3.medium 2대, LB Controller + Strimzi + Kafka)까지는 여유가 충분했다. **9단계**에서 monolith(768Mi×2) + event-service + web 이 올라가면 빠듯해지므로 그때 노드 추가를 검토.
+- 노드 용량: 7단계 시점(t3.medium 2대, LB Controller)까지는 여유가 충분했다 (11-23 에는 Strimzi + Kafka 1Gi 도 올라가 있었다 — 지금은 없음). **9단계**에서 core-service(768Mi×2) + event-service + web 이 올라가면 빠듯해지므로 그때 노드 추가를 검토.
   ```bash
   kubectl describe nodes | grep -A6 'Allocated resources' | grep -E 'cpu|memory'
   ```
 
 ## 7-1. 보안그룹 원칙 — "EKS 노드 SG 에서만"
-RDS·Redis SG 인바운드는 CIDR 이 아니라 **노드 SG 를 참조**한다 (`referenced_security_group_id`).
+RDS·ElastiCache SG 인바운드는 CIDR 이 아니라 **노드 SG 를 참조**한다 (`referenced_security_group_id`).
 노드 IP 가 바뀌거나 Karpenter 노드가 추가돼도 같은 SG 를 쓰므로 규칙을 고칠 필요가 없다.
 파드도 VPC CNI 기본 설정에서는 노드의 SG 를 쓴다.
 
@@ -111,11 +114,14 @@ output "security_group_id" { value = aws_security_group.rds.id }
 `FATAL: no pg_hba.conf entry for host "...", user "app_rw", database "point", no encryption` 으로 거부된다.
 → psql 은 `sslmode=require`, 9단계 JDBC URL 은 `?sslmode=require` 를 붙인다.
 
-## 7-3. ElastiCache — `modules/elasticache/`
+## 7-3. ElastiCache — `modules/elasticache/` (Valkey 복제 그룹)
 
-엔진 버전 확인 (서울 리전 지원: `4.0.10 5.0.6 6.0 6.2 7.0 7.1`):
+point-infra [data-architecture §1](../../../point-infra/docs/01-architecture/data-architecture.md): **Valkey 7.2, Primary + Replica, Multi-AZ + 자동 장애 조치 필수 (Cluster mode 비활성)**.
+원장 반영 Stream 이 여기에 있으므로 학습용이어도 이 부분은 설계대로 한다 (1노드면 노드 장애 = 아직 원장에 안 들어간 당첨 유실).
+
+엔진 버전 확인:
 ```bash
-aws elasticache describe-cache-engine-versions --engine redis --query 'CacheEngineVersions[].EngineVersion' --output text
+aws elasticache describe-cache-engine-versions --engine valkey --query 'CacheEngineVersions[].EngineVersion' --output text
 ```
 
 **`modules/elasticache/variables.tf`**
@@ -124,9 +130,13 @@ variable "name" { type = string }
 variable "vpc_id" { type = string }
 variable "subnet_ids" { type = list(string) }                 # Private-Data 서브넷 3개
 variable "allowed_security_group_ids" { type = list(string) } # 6379 허용할 SG (EKS 노드 SG)
+variable "node_type" {
+  type    = string
+  default = "cache.t4g.micro"
+}
 ```
 
-**`modules/elasticache/main.tf`**
+**`modules/elasticache/main.tf`** (SG·서브넷 그룹은 이전과 같음)
 ```hcl
 resource "aws_security_group" "redis" {
   name   = "${var.name}-redis"
@@ -147,24 +157,44 @@ resource "aws_elasticache_subnet_group" "this" {
   subnet_ids = var.subnet_ids # Private-Data 3개
 }
 
-resource "aws_elasticache_cluster" "this" {
-  cluster_id         = "${var.name}-redis"
-  engine             = "redis"
-  engine_version     = "7.1"
-  node_type          = "cache.t4g.micro"
-  num_cache_nodes    = 1
-  port               = 6379
+resource "aws_elasticache_replication_group" "this" {
+  replication_group_id = "${var.name}-redis"
+  description          = "point event keys + reward streams (ADR-0007, ADR-0019)"
+  engine               = "valkey"
+  engine_version       = "7.2"
+  parameter_group_name = "default.valkey7"
+  node_type            = var.node_type
+  port                 = 6379
+
+  num_cache_clusters         = 2 # primary 1 + replica 1 (서로 다른 AZ)
+  automatic_failover_enabled = true
+  multi_az_enabled           = true
+
   subnet_group_name  = aws_elasticache_subnet_group.this.name
   security_group_ids = [aws_security_group.redis.id]
+
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = false # 앱(spring.data.redis)이 TLS 없이 붙는다 — 운영은 TLS 검토
+  snapshot_retention_limit   = 0     # 학습용
+  apply_immediately          = true
 }
 ```
 
 **`modules/elasticache/outputs.tf`**
 ```hcl
-output "endpoint" { value = aws_elasticache_cluster.this.cache_nodes[0].address }
+# 앱은 항상 primary 엔드포인트로 붙는다 (장애 조치 시 DNS 가 새 primary 로 바뀐다)
+output "endpoint" { value = aws_elasticache_replication_group.this.primary_endpoint_address }
 ```
-- event-service 설정(`spring.data.redis.host/port`)이 TLS·AUTH 없이 붙는 구조라 전송 암호화를 끈 단일 노드로 시작. 운영 설계(ADR-0007: Cluster mode, Multi-AZ, 암호화)와 다른 점을 기록.
-- (선택) `engine = "valkey"` 가 더 싸다. Redis 7 호환.
+
+| 설정 | 이유 |
+|---|---|
+| `aws_elasticache_replication_group` | `aws_elasticache_cluster`(이전, 1노드)는 복제·장애 조치가 없다. 리소스 종류가 바뀌므로 **apply 하면 교체**(기존 1노드 삭제 → 새로 생성)되고 엔드포인트도 바뀐다 → 9단계 `REDIS_HOST` 갱신 |
+| `num_cache_clusters = 2` + `automatic_failover_enabled` + `multi_az_enabled` | primary 가 죽으면 replica 가 승격. 복제는 **비동기**라 장애 조치 순간 마지막 쓰기 일부가 유실될 수 있다 (ADR-0019 "Redis 가용성") |
+| Cluster mode 비활성 | 키는 `event:{id}:…` 해시태그로 묶여 있어 클러스터 모드로 가도 되지만, 설계는 비활성 (샤드 1개) |
+| `engine = "valkey"` | Redis 7.2 호환 오픈소스 포크. 같은 노드 타입이 Redis 보다 싸다. Lua·Stream(`XADD`, `XREADGROUP`, `XCLAIM`)·`PEXPIRETIME` 그대로 동작 |
+| `transit_encryption_enabled = false` | 운영 설계(전송 암호화)와 다른 점. 켜면 앱에 `spring.data.redis.ssl.enabled=true` 가 필요하다 |
+
+💸 노드가 2개가 되므로 ElastiCache 비용이 약 2배 (t4g.micro ×2).
 
 ## 7-4. `envs/dev` 연결
 
@@ -201,8 +231,8 @@ cd ~/point/point-private/envs/dev
 terraform init            # ⚠️ 새 module 블록을 추가하면 반드시 다시 init
 terraform fmt -recursive ../..
 terraform validate
-terraform plan            # rds 3 + redis 4 = 7 to add
-terraform apply           # RDS ≈ 5~10분, ElastiCache ≈ 5~10분
+terraform plan            # 처음: rds 3 + redis 4 = 7 to add / 11-26 변경 후: aws_elasticache_cluster 1 destroy, aws_elasticache_replication_group 1 add
+terraform apply           # RDS ≈ 5~10분, ElastiCache 복제 그룹 ≈ 10~15분
 terraform output
 ```
 
@@ -211,98 +241,35 @@ terraform output
 - 해결: **`envs/dev` 에서** `terraform init`. 그래도 VS Code 에 빨간 줄이 남으면 `Ctrl+Shift+P` → *Developer: Reload Window*.
 - ⚠️ **모듈 폴더(`modules/elasticache/`) 안에서 `terraform init` 을 하지 않는다.** 모듈은 혼자 실행하는 루트가 아니다. 실행하면 그 폴더에 `.terraform/`, `.terraform.lock.hcl` 가 생기는데 쓸모없고 헷갈리기만 한다 (이번에 생겨서 삭제함).
 
-### 실제 결과
+### 실제 결과 (2026-11-23, Redis 1노드 시절)
 | 리소스 | 값 |
 |---|---|
 | RDS | `point-dev-pg.<id>.ap-northeast-2.rds.amazonaws.com`, `available`, 16.15 (`aarch64` — t4g 는 Graviton) |
 | 마스터 비밀 | `arn:aws:secretsmanager:...:secret:rds!db-<uuid>` |
 | Redis | `point-dev-redis.<id>.0001.apn2.cache.amazonaws.com`, `available`, 7.1.0 |
 
-## 7-5. Kafka — Strimzi
+Valkey 복제 그룹으로 바꾼 뒤에는 엔드포인트 모양이 `master.point-dev-redis.<id>.apn2.cache.amazonaws.com` 류(primary 엔드포인트)가 된다 — ⚠️ 확인: 적용 후 `terraform output -raw redis_endpoint` 값으로 기록.
 
-```bash
-helm repo add strimzi https://strimzi.io/charts/ && helm repo update
-helm search repo strimzi/strimzi-kafka-operator | head -3       # 이번 실습: 1.3.1
-kubectl create namespace kafka
-helm install strimzi strimzi/strimzi-kafka-operator -n kafka
-kubectl get pods -n kafka                                        # strimzi-cluster-operator Running
-kubectl api-resources | grep kafka.strimzi.io                    # ← apiVersion 반드시 확인
+## 7-5. 원장 반영 Redis Stream (Kafka 대신, ADR-0019)
+
+Kafka 클러스터를 따로 띄우지 않는다. 7-3 의 Valkey 하나가 이벤트 판정과 원장 반영 버퍼를 같이 맡는다. 만들 리소스는 없고, 9단계 앱이 뜨면 키가 생긴다.
+
 ```
-
-### 이번에 겪은 문제 ② — `no matches for kind "KafkaNodePool" in version "kafka.strimzi.io/v1beta2"`
-- **Strimzi 1.x 는 CRD 를 `kafka.strimzi.io/v1` 로만 제공**한다 (`v1beta2` 는 0.x 시절 버전으로 제거됨).
-- 인터넷 예제·블로그 대부분이 `v1beta2` 라서 그대로 쓰면 이 에러가 난다. 메시지는 "CRD 가 없다" 같지만 실제로는 **CRD 는 있는데 그 버전이 없다**는 뜻.
-- 확인 방법:
-  ```bash
-  kubectl api-resources | grep kafka.strimzi.io       # APIVERSION 열 = kafka.strimzi.io/v1
-  kubectl get crd kafkas.kafka.strimzi.io -o jsonpath='{range .spec.versions[*]}{.name} served={.served}{"\n"}{end}'
-  kubectl apply --dry-run=server -f k8s/platform/kafka/kafka.yaml   # 적용 전 서버 검증
-  ```
-- KRaft 전용이라 예전 `strimzi.io/node-pools`, `strimzi.io/kraft` annotation 도 필요 없다.
-
-**`k8s/platform/kafka/kafka.yaml`** (KRaft, 노드 1개)
-```yaml
-apiVersion: kafka.strimzi.io/v1
-kind: KafkaNodePool
-metadata:
-  name: dual
-  namespace: kafka
-  labels:
-    strimzi.io/cluster: point
-spec:
-  replicas: 1
-  roles: [controller, broker]
-  storage:
-    type: ephemeral                 # 파드 재시작 시 데이터 유실 — 학습용
-  resources:
-    requests: { cpu: 250m, memory: 1Gi }
-    limits:   { memory: 1Gi }
----
-apiVersion: kafka.strimzi.io/v1
-kind: Kafka
-metadata:
-  name: point
-  namespace: kafka
-spec:
-  kafka:
-    # version: 생략하면 operator 기본 버전 (Strimzi 1.3.1 → Kafka 4.3.2)
-    listeners:
-      - name: plain
-        port: 9092
-        type: internal
-        tls: false
-    config:
-      offsets.topic.replication.factor: 1
-      transaction.state.log.replication.factor: 1
-      transaction.state.log.min.isr: 1
-      default.replication.factor: 1
-      min.insync.replicas: 1
-      auto.create.topics.enable: "true"     # 로컬 compose 와 동일
-  entityOperator:
-    topicOperator: {}
+event-service ──Lua 1회 (원자)──▶ Valkey
+  판정(SADD participants / DECR stock) + 당첨이면 XADD event:{id}:rewards     ← 판정과 기록이 한 스크립트
+core-service (consumer group point-ledger) ──XREADGROUP──▶ 원장 INSERT (idempotency_key UNIQUE) ──▶ XACK
 ```
 
-```bash
-kubectl apply -f k8s/platform/kafka/kafka.yaml
-kubectl wait kafka/point -n kafka --for=condition=Ready --timeout=600s     # 약 1분
-kubectl get kafka,kafkanodepool,pods,svc -n kafka
-```
-실제 결과:
-```
-kafka.kafka.strimzi.io/point   READY True   WARNINGS True   KAFKA VERSION 4.3.2   METADATA VERSION 4.3-IV0
-pod/point-dual-0                  Running     ← 브로커+컨트롤러
-pod/point-entity-operator-...     Running     ← Topic Operator
-service/point-kafka-bootstrap     9091/TCP,9092/TCP
-```
-→ 앱에서 쓸 주소: **`point-kafka-bootstrap.kafka.svc:9092`**
+| 키 | 타입 | 내용 |
+|---|---|---|
+| `event:{id}:rewards` | Stream | 퀴즈 당첨 기록. 7일 보존 (`XTRIM MINID`) — `XACK` 뒤에도 남긴다 |
+| `attendance:{yyyyMMdd}:rewards` | Stream | 출석 보상 |
+| `reward:streams` | Set | core-service 가 읽을 퀴즈 Stream 목록. 이벤트를 열 때 등록 |
+| `reward:dlq` | Stream | 전달 5회 초과·비재시도 오류 → 운영자 재처리 |
 
-`WARNINGS True` 의 내용 (의도한 구성이라 무시):
-```bash
-kubectl get kafka point -n kafka -o jsonpath='{range .status.conditions[*]}{.type}={.status} [{.reason}] {.message}{"\n"}{end}'
-# Warning=True [KafkaStorage] A Kafka cluster with a single broker node and ephemeral storage will lose topic messages after any restart or rolling update.
-# Warning=True [KafkaStorage] A Kafka cluster with a single controller node and ephemeral storage will lose data after any restart or rolling update.
-```
-- 로컬은 Kafka 3.8, 여기는 **4.3.2**. Kafka 4 는 ZooKeeper 가 완전히 제거되고 KRaft 전용. 클라이언트(Spring Kafka, `apache/kafka:3.8.0` CLI)는 그대로 호환됐다 (아래 확인 참고).
+- 재시도: 처리 안 된 항목(PEL)은 60초가 지나면 다른 core-service 파드가 `XPENDING` + `XCLAIM` 으로 가져간다
+- 반영이 멱등(`idempotency_key`)이라 같은 항목이 두 번 와도 원장은 1건
+- Kafka 때와 달리 **core-service 도 Redis 에 접속한다** → 9단계 core-service ConfigMap 에 `REDIS_HOST`·`REDIS_PORT`·`REWARD_STREAM_ENABLED=true`
 
 ## 7-6. 앱 계정 `app_rw` 만들기 (ADR-0013 `db-init` 개념)
 ADR-0013: 마스터 계정은 DB 초기화에만 쓰고, 앱은 `app_rw` 로 접속. 지금은 손으로 하고, 11단계에서 Job 으로 바꾼다.
@@ -354,8 +321,8 @@ kubectl logs pg-init          # DO / GRANT / GRANT
 kubectl delete pod pg-init
 ```
 - `GRANT CREATE ON DATABASE` — 새 스키마를 만들 수 있는 권한.
-- `GRANT USAGE, CREATE ON SCHEMA public` — **public 스키마 안에 테이블을 만드는 권한.** monolith 의 Flyway 가 `public` 에 테이블을 만든다.
-  PostgreSQL 15 부터 `public` 스키마의 CREATE 가 PUBLIC 에서 회수됐다 → 이게 없으면 9단계 monolith 가
+- `GRANT USAGE, CREATE ON SCHEMA public` — **public 스키마 안에 테이블을 만드는 권한.** core-service 의 Flyway 가 `public` 에 테이블을 만든다.
+  PostgreSQL 15 부터 `public` 스키마의 CREATE 가 PUBLIC 에서 회수됐다 → 이게 없으면 9단계 core-service 가
   `ERROR: permission denied for schema public` 으로 CrashLoopBackOff (9단계에서 실제로 겪음. 처음엔 DATABASE 권한만 줬었다).
 - 비밀번호를 `--env` 로 넘기면 파드 spec 에 남는다 → 끝나면 바로 파드 삭제. 운영은 Secret 참조로 (11단계).
 
@@ -381,30 +348,36 @@ run pg-app --image=postgres:16 --env PGPASSWORD="$APP_PW" --command -- \
 run pg-nossl --image=postgres:16 --env PGPASSWORD="$APP_PW" --command -- \
   psql "host=$RDS user=app_rw dbname=point sslmode=disable" -c "select 1;"
 
-# 3) Redis
+# 3) Valkey — redis-cli 로 그대로 붙는다 (Redis 프로토콜 호환)
 run rc --image=redis:7-alpine --command -- redis-cli -h $REDIS ping
+run rrole --image=redis:7-alpine --command -- sh -c "redis-cli -h $REDIS info replication | grep -E '^(role|connected_slaves):'"   # role:master, connected_slaves:1
 
-# 4) Kafka (토픽 생성 + 목록)
-run kc --image=apache/kafka:3.8.0 --command -- sh -c \
-  '/opt/kafka/bin/kafka-topics.sh --bootstrap-server point-kafka-bootstrap.kafka.svc:9092 --create --if-not-exists --topic smoke-test --partitions 1 --replication-factor 1 &&
-   /opt/kafka/bin/kafka-topics.sh --bootstrap-server point-kafka-bootstrap.kafka.svc:9092 --list'
+# 4) 복제 그룹 구성 (AWS 쪽)
+aws elasticache describe-replication-groups --replication-group-id point-dev-redis \
+  --query 'ReplicationGroups[0].[Status,AutomaticFailover,MultiAZ,length(MemberClusters)]' --output text   # available enabled enabled 2
+
+# 5) (9단계 앱이 뜬 뒤) 원장 반영 Stream — consumer group point-ledger 의 pending·lag 가 0 이면 다 반영된 것
+run rs --image=redis:7-alpine --command -- sh -c "for s in \$(redis-cli -h $REDIS smembers reward:streams); do echo \$s; redis-cli -h $REDIS xinfo groups \$s; done"
 ```
 
-### 실제 결과
+### 실제 결과 (2026-11-23 — Redis 1노드·Kafka 시절)
 | 확인 | 결과 |
 |---|---|
 | app_rw 접속 | `Succeeded` — `current_user = app_rw`, `can_create = t` |
 | SSL 없이 접속 | `Failed` — `no pg_hba.conf entry ... no encryption` (SSL 강제 동작) |
 | Redis | `PONG` |
-| Kafka | `Created topic smoke-test.` → 목록에 `smoke-test` (3.8 CLI ↔ 4.3.2 브로커 호환) |
+| Kafka (삭제됨) | `Created topic smoke-test.` → 목록에 `smoke-test` (3.8 CLI ↔ 4.3.2 브로커 호환) |
 
-로컬(WSL)에서 RDS·Redis 로 직접 접속은 **안 되는 게 정상** (private 서브넷 + SG).
+Valkey 복제 그룹 확인(3·4·5번)은 다시 올린 뒤 기록한다 — 자동 검사는 `tests/run.sh 07`.
+
+로컬(WSL)에서 RDS·ElastiCache 로 직접 접속은 **안 되는 게 정상** (private 서브넷 + SG).
 
 ## 자주 막히는 곳
 | 증상 | 원인 / 해결 |
 |---|---|
 | `Module not installed` / VS Code 빨간 줄 | 새 module 추가 후 `envs/dev` 에서 `terraform init` |
-| `no matches for kind ... kafka.strimzi.io/v1beta2` | Strimzi 1.x → `apiVersion: kafka.strimzi.io/v1` |
+| core-service 로그 `reward stream read failed` | core-service ConfigMap 의 `REDIS_HOST` 가 비었거나 예전(1노드) 엔드포인트 → `terraform output -raw redis_endpoint` |
+| 당첨인데 잔액이 안 바뀜 | `xinfo groups` 의 pending 이 쌓임 → core-service 로그의 `reward apply failed`, DLQ `xlen reward:dlq` |
 | `syntax error at or near "$"` | K8s 가 `$$` → `$` 치환 → `$do$` 사용 |
 | `jq: command not found` → 비밀번호가 빈 값 → 인증 실패 | jq 설치 (위 사전 준비). `set -o pipefail` 로 실패를 바로 잡기 |
 | `pod ... terminated (Error)` 메시지 없음 | `-i --rm` 대신 wait → logs 패턴 |
@@ -412,18 +385,15 @@ run kc --image=apache/kafka:3.8.0 --command -- sh -c \
 | `no pg_hba.conf entry ... no encryption` | `sslmode=require` |
 | `permission denied for database` (Flyway) | `GRANT CREATE ON DATABASE point TO app_rw` 누락 |
 | `permission denied for schema public` (Flyway) | PG15+ → `GRANT USAGE, CREATE ON SCHEMA public TO app_rw` 누락 |
-| Kafka 파드 Pending | 노드 메모리 부족 → 노드 추가 |
+| `InvalidParameterCombination` (ElastiCache) | 노드 타입이 Multi-AZ·자동 장애 조치를 지원하는지 / `num_cache_clusters` ≥ 2 인지 |
 | `InvalidParameterCombination` (RDS) | 인스턴스 클래스와 엔진 버전 조합 미지원 → `describe-orderable-db-instance-options` |
 
 ## 🧹 정리
 ```bash
-kubectl delete -f k8s/platform/kafka/kafka.yaml      # Kafka 파드 (ephemeral 이라 EBS 잔여 없음)
-helm uninstall strimzi -n kafka
-kubectl delete ns kafka
-# RDS·Redis 는 envs/dev terraform destroy 에 포함 (skip_final_snapshot = true 확인)
+# RDS·ElastiCache 는 envs/dev terraform destroy 에 포함 (skip_final_snapshot = true 확인)
+# (이전 Kafka 실습을 했던 클러스터라면) kubectl delete ns kafka — Strimzi Application 은 11단계 Git 에서 지웠다
 rm -f ~/.config/point-dev/app_rw_password            # 8단계에서 Secrets Manager 에 넣은 뒤
 ```
 - `manage_master_user_password` 가 만든 마스터 비밀(`rds!db-...`)은 RDS 삭제 시 함께 삭제된다.
-- 클러스터째 destroy 할 거면 Strimzi 정리는 생략 가능.
 
-💸 RDS db.t4g.micro + ElastiCache cache.t4g.micro ≈ 각각 시간당 $0.02~0.03 수준 (정확한 서울 단가는 가격 계산기로).
+💸 RDS db.t4g.micro ≈ 시간당 $0.02~0.03, ElastiCache cache.t4g.micro **× 2** ≈ 그 2배 (정확한 서울 단가는 가격 계산기로). 대신 Strimzi Kafka 가 쓰던 노드 메모리 1Gi 는 빠진다.

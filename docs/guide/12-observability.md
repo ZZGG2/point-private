@@ -103,10 +103,10 @@ point-backend 는 이미 `management.endpoints.web.exposure.include: health,info
 **base Service 3개 수정** — 포트 **이름**과 `app` **라벨** (ServiceMonitor 는 Service 라벨로 찾고, 포트를 이름으로 참조):
 ```yaml
 metadata:
-  name: monolith
-  labels: { app: monolith }
+  name: core-service             # 11-26 monolith → core-service
+  labels: { app: core-service }
 spec:
-  selector: { app: monolith }
+  selector: { app: core-service }
   ports: [{ name: http, port: 80, targetPort: 8080 }]
 ```
 **[`k8s/apps/overlays/dev/servicemonitor.yaml`](../../k8s/apps/overlays/dev/servicemonitor.yaml)** (kustomization `resources` 에 추가)
@@ -118,7 +118,7 @@ metadata:
 spec:
   selector:
     matchExpressions:
-      - { key: app, operator: In, values: [monolith, event-service] }
+      - { key: app, operator: In, values: [core-service, event-service] }
   endpoints:
     - port: http
       path: /actuator/prometheus
@@ -130,7 +130,7 @@ spec:
 MANAGEMENT_METRICS_DISTRIBUTION_PERCENTILESHISTOGRAM_HTTP_SERVER_REQUESTS=true
 ```
 
-### 문제 ② — monolith·event-service 새 파드 CrashLoopBackOff
+### 문제 ② — core-service(당시 monolith)·event-service 새 파드 CrashLoopBackOff
 처음엔 `..._PERCENTILES_HISTOGRAM_HTTP_SERVER_REQUESTS=true` 로 썼다:
 ```
 Failed to bind properties under 'management.metrics.distribution.percentiles.histogram.http.server.requests' to double[]:
@@ -147,12 +147,24 @@ kubectl port-forward -n monitoring svc/kps-kube-prometheus-stack-prometheus 9090
 curl -s 'http://localhost:9090/api/v1/targets?state=active' | jq -r '.data.activeTargets[] | select(.labels.namespace=="point") | "\(.labels.job) \(.labels.pod) \(.health)"'
 curl -s 'http://localhost:9090/api/v1/targets?state=active' | jq '[.data.activeTargets[] | select(.health!="up")] | length'
 ```
+결과 (11-23, monolith 시절 — 지금은 job 이름이 `core-service`):
+
 | 확인 | 결과 |
 |---|---|
 | point 타겟 | monolith ×2, event-service ×1 — 전부 `up` |
 | DOWN 타겟 | **0** (컨트롤플레인 수집을 끈 덕분) |
 | `http_server_requests_seconds_bucket` | monolith 207 시리즈, event-service 138 시리즈 |
 | `kube_node_labels` by workload | core 3, event 1 |
+
+### 11-26 — Kafka 지표 대신 Redis Stream 소비 확인
+Kafka 를 뺐으므로 `kafka_consumer_*` 지표(spring-kafka)는 없다. core-service 의 Stream 소비는 Redis 클라이언트(Lettuce) 지표와 로그로 본다:
+```bash
+# core-service 의 Lettuce 명령 지표 (XREADGROUP 등) — ⚠️ 확인: Spring Boot 4 에서 지표 이름이 lettuce_command_* 인지 적용 후 기록
+curl -s --get 'http://localhost:9090/api/v1/query' --data-urlencode 'query=count({namespace="point",job="core-service",__name__=~"lettuce_.*"})' | jq -r '.data.result[0].value[1]'
+kubectl logs -n point -l app=core-service --since=10m | grep -cE 'reward applied'                     # 반영 건수
+kubectl logs -n point -l app=core-service --since=10m | grep -E 'reward (stream read|apply) failed|DLQ'  # 없어야 정상
+```
+pending·lag 는 Valkey 에서 직접 본다 (7단계 확인 5번, `tests/run.sh 07`).
 
 ## 12-4. 대시보드 — 코드로 ([`k8s/platform/monitoring/dashboards/point-scaling.yaml`](../../k8s/platform/monitoring/dashboards/point-scaling.yaml))
 Grafana UI 에서 만들고 Export 하는 대신, **ConfigMap 으로 커밋** → Grafana 사이드카가 `grafana_dashboard: "1"` 라벨을 보고 자동으로 불러온다. 11단계 `platform-config` Application 의 `include` 에 `monitoring/dashboards/*.yaml` 추가.

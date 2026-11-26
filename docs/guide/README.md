@@ -3,6 +3,11 @@
 [ROADMAP.md](../../ROADMAP.md)의 각 단계를 **실제로 진행한 방식 그대로** 정리한 문서.
 ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔나"다.
 
+> 🔄 **2026-11-26 — point-infra 설계 변경 반영** ([ROADMAP 맨 위](../../ROADMAP.md) 요약)
+> Kafka 제거 → 원장 반영은 ElastiCache **Redis Stream** (ADR-0019), ElastiCache 는 **Valkey 복제 그룹(Multi-AZ)**, **monolith → core-service**, 이미지 `v0.2.0`.
+> 코드(`k8s/`, `modules/`, `envs/`, `tests/`)와 각 문서의 "하는 방법"은 새 설계로 고쳤고, 날짜가 붙은 "실제 결과"는 당시 기록으로 남겼다.
+> ⚠️ 이 변경은 **아직 AWS 에 적용하지 않았다.** 다시 올릴 때 바뀌는 리소스: ElastiCache(교체), ECR `point/monolith` → `point/core-service`(교체), Secrets Manager `point-dev/monolith` → `point-dev/core-service`(새로 만들기)
+
 | 단계 | 문서 | 핵심 결과물 |
 |---|---|---|
 | 0 | [00-prep.md](00-prep.md) | 도구, Git 연동, 디렉터리 구조 |
@@ -12,7 +17,7 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | 4 | [04-smoke-app.md](04-smoke-app.md) | `k8s/smoke/` — nginx Deployment/Service, probe·resources 실험 |
 | 5 | [05-lbc-gateway.md](05-lbc-gateway.md) | AWS LB Controller + Gateway API → 인터넷에서 ALB로 접속 |
 | 6 | [06-ecr.md](06-ecr.md) | `modules/ecr` — 레포 3개, 이미지 빌드·푸시 |
-| 7 | [07-data.md](07-data.md) | `modules/rds`, `modules/elasticache`, Strimzi Kafka, `app_rw` |
+| 7 | [07-data.md](07-data.md) | `modules/rds`, `modules/elasticache` (Valkey 복제 그룹), `app_rw` — Kafka 는 ADR-0019 로 제거 |
 | 8 | [08-external-secrets.md](08-external-secrets.md) | Secrets Manager → ESO → K8s Secret (DB, JWT 키) |
 | 9 | [09-point-app.md](09-point-app.md) | `k8s/apps` Kustomize, HTTPRoute 3분기, 데모 시나리오 |
 | 10 | [10-karpenter-keda.md](10-karpenter-keda.md) | Spot NodePool, ScaledObject, 부하 테스트·확장 시간 측정 |
@@ -33,12 +38,12 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 3. `aws eks update-kubeconfig --name point-dev-eks --region ap-northeast-2`
 4. 5단계: CRD 설치 → `values.yaml` 의 **vpcId 갱신** → Helm 설치 → (선택) `kubectl apply -f k8s/smoke/` — smoke 는 11월 23일에 지웠다, 확인용으로만
 5. 내 공인 IP 가 바뀌었으면 `terraform.tfvars` 의 `my_ip_cidr` 와 `30-gateway.yaml` 의 `sourceRanges` 수정
-6. (6단계 이후) ECR 은 `force_delete` 로 이미지째 삭제됨 → 이미지 다시 빌드·푸시
-7. (7단계 이후) RDS·Redis 는 `envs/dev` apply 에 포함. Strimzi Helm 설치 → `kubectl apply -f k8s/platform/kafka/kafka.yaml` → `app_rw` 다시 생성 (7-6, 비밀번호 파일 `~/.config/point-dev/app_rw_password` 재사용. **public 스키마 GRANT 포함**)
-8. (8단계 이후) ESO IAM 은 `envs/dev` apply 에 포함. Secrets Manager 비밀 2개 다시 생성 (8-1 — RDS 엔드포인트가 바뀌므로 JSON 새로 만들기) → ESO Helm → `cluster-secret-store.yaml`
-9. (9단계 이후) `overlays/dev/kustomization.yaml` 의 `REDIS_HOST`, `gateway.yaml` 의 `sourceRanges` 확인 → `kubectl apply -f k8s/platform/gateway/gatewayclass.yaml` → `kubectl apply -k k8s/apps/overlays/dev`
+6. (6단계 이후) ECR 은 `force_delete` 로 이미지째 삭제됨 → 이미지 다시 빌드·푸시 (`point/core-service`·`event-service`·`web` 를 `v0.2.0` 으로 — 06 문서)
+7. (7단계 이후) RDS·Valkey(복제 그룹) 는 `envs/dev` apply 에 포함 (Kafka/Strimzi 는 없다 — ADR-0019). `app_rw` 다시 생성 (7-6, 비밀번호 파일 `~/.config/point-dev/app_rw_password` 재사용. **public 스키마 GRANT 포함**)
+8. (8단계 이후) ESO IAM 은 `envs/dev` apply 에 포함. Secrets Manager 비밀 2개(`point-dev/core-service`, `point-dev/event-service`) 다시 생성 (8-1 — RDS 엔드포인트가 바뀌므로 JSON 새로 만들기) → ESO Helm → `cluster-secret-store.yaml`
+9. (9단계 이후) `overlays/dev/kustomization.yaml` 의 `REDIS_HOST` **2곳** (core-service·event-service, `terraform output -raw redis_endpoint`), `gateway.yaml` 의 `sourceRanges` 확인 → `kubectl apply -f k8s/platform/gateway/gatewayclass.yaml` → `kubectl apply -k k8s/apps/overlays/dev`
 10. (10단계 이후) Karpenter IAM·SQS·metrics-server 는 `envs/dev` apply 에 포함. Karpenter Helm (`k8s/platform/karpenter/values.yaml`) → `nodepool-event.yaml` → KEDA Helm. ScaledObject 의 cron 시각은 그날 관찰할 시각으로
-11. (11단계 이후) **여기부터는 Helm/kubectl 수동 설치를 하지 않는다.** `envs/dev` apply 가 ArgoCD + root 까지 만들면, root 가 Git 의 `k8s/argocd/apps` 를 읽어 LBC·ESO·KEDA·Karpenter·Strimzi·모니터링·플랫폼 설정·point 앱을 전부 설치한다.
+11. (11단계 이후) **여기부터는 Helm/kubectl 수동 설치를 하지 않는다.** `envs/dev` apply 가 ArgoCD + root 까지 만들면, root 가 Git 의 `k8s/argocd/apps` 를 읽어 LBC·ESO·KEDA·Karpenter·모니터링·플랫폼 설정·point 앱을 전부 설치한다.
     - 그 전에 Git 에서 고칠 것: `k8s/platform/aws-lbc/values.yaml` vpcId, `overlays/dev` 의 `REDIS_HOST`·`sourceRanges`·이미지 태그, `db-init.yaml` 의 `rds!db-...` 이름 → commit + push
     - 순서상 Terraform 밖에 남는 것: Gateway API CRD (5단계, ArgoCD 전에 `kubectl apply`), Secrets Manager 비밀 2개 (8-1), `monitoring/grafana-admin` Secret (12-1)
     - 7-6 `app_rw` 는 db-init PreSync Job 이 대신한다
@@ -60,10 +65,10 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 | Gateway API CRD | v1.6.0 standard | |
 | jq | 1.7.1 (`~/.local/bin`) | WSL 기본 미설치 (07 문서 참고) |
 | RDS PostgreSQL | 16.15 (`db.t4g.micro`) | SSL 강제 (`sslmode=require`) |
-| ElastiCache Redis | 7.1.0 (`cache.t4g.micro`) | |
-| Strimzi | 1.3.1 → Kafka 4.3.2 (KRaft) | CRD 는 **`kafka.strimzi.io/v1`** 만 제공 (`v1beta2` 아님) |
+| ElastiCache Valkey | 7.2 (`cache.t4g.micro` × 2, Multi-AZ, 자동 장애 조치) | 11-26 변경 (이전: Redis 7.1.0 1노드). 원장 반영 Redis Stream (ADR-0019) |
+| ~~Strimzi~~ | ~~1.3.1 → Kafka 4.3.2~~ | 11-26 제거 (ADR-0019). 기록은 07 문서 git 이력 |
 | External Secrets Operator | 2.15.0 (chart 2.15.0) | API `external-secrets.io/v1` |
-| point 이미지 | `v0.1.0` (linux/amd64) | 9단계 `SPRING_PROFILES_ACTIVE=local` |
+| point 이미지 | `v0.2.0` (linux/amd64) — core-service·event-service·web | Spring Boot 4.1, Redis Stream. 9단계 `SPRING_PROFILES_ACTIVE=local` (이전 `v0.1.x` 는 monolith·Kafka) |
 | Karpenter | 1.15.3 (OCI chart) | K8s 1.37 은 **1.15.x 만** 지원 (호환표). EKS 모듈 `//modules/karpenter` 21.30.2 |
 | metrics-server | EKS 애드온 v0.9.1 | `modules/eks` `addons` |
 | KEDA | 2.21.1 (chart 2.21.1) | |
@@ -80,5 +85,5 @@ ROADMAP이 "무엇을"이라면, 여기는 "어떻게 + 왜 + 어디서 막혔�
 - 비밀값은 Git·state 에 두지 않는다 → Secrets Manager (CLI 로 생성) → ESO → K8s Secret
 - Karpenter 가 만든 EC2 는 **Terraform state 에 없다** → destroy 전에 NodePool 부터 지운다 (10 문서 정리)
 - 11단계 이후 클러스터 안의 변경은 **Git commit + push** 로만 (손으로 바꾸면 selfHeal 이 되돌린다). 정리할 땐 root → Application → 리소스 순서 ([11 문서 정리](11-argocd.md#-정리))
-- Spring 설정을 환경변수로 덮을 땐 relaxed binding: `.`→`_`, **하이픈은 제거**, 대문자 (`app.admin.api-token` → `APP_ADMIN_APITOKEN`)
+- Spring 설정을 환경변수로 덮을 땐 relaxed binding: `.`→`_`, **하이픈은 제거**, 대문자 (`app.admin.api-token` → `APP_ADMIN_APITOKEN`, `management.metrics.distribution.percentiles-histogram.http.server.requests` → `..._PERCENTILESHISTOGRAM_...`)
 - 하루 실습이 끝나면 **역순 정리** → [05 문서의 정리 순서](05-lbc-gateway.md#정리-순서-중요) + ROADMAP 맨 아래

@@ -3,6 +3,9 @@
 [13 문서](13-tests.md)의 `tests/run.sh` 가 자동으로 하는 검사를 **손으로 하나씩** 실행해 보는 순서.
 명령마다 "통과 기준"을 적었다. 2026-11-24 재구축 환경 기준.
 
+> 🔄 **2026-11-26 — 명령은 새 설계 기준으로 고쳤다** (Kafka 제거·Redis Stream, Valkey 복제 그룹, monolith → core-service, 이미지 `v0.2.0`, 운영 이벤트 생성 API).
+> 아래 11-24 "덮어쓴 곳" 표와 `kafka` namespace 설명은 당시 클러스터 상태 기록이다.
+
 ## 공통 준비 (셸마다 1회)
 ```bash
 export PATH=$HOME/.local/bin:$PATH
@@ -72,11 +75,11 @@ kubectl -n kube-system logs deploy/aws-load-balancer-controller --since=30m | gr
 
 ## 6단계 — ECR
 ```bash
-for r in monolith event-service web; do
+for r in core-service event-service web; do
   echo "$r: $(aws ecr list-images --repository-name point/$r --query 'imageIds[].imageTag' --output text)"; done
 kubectl get pods -n point -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' | sort -u
 ```
-- 통과: monolith·event-service `v0.1.0`, web `v0.1.0` + `v0.1.1` (같은 이미지에 태그만 추가), `ImagePullBackOff` 없음.
+- 통과: 세 레포 모두 `v0.2.0`, `ImagePullBackOff` 없음. (11-24: monolith·event-service `v0.1.0`, web `v0.1.0` + `v0.1.1`)
 
 ## 7단계 — 데이터 계층
 ```bash
@@ -93,18 +96,23 @@ kubectl run -it --rm pg2 --image=postgres:16 --env=PGPASSWORD="$(cat ~/.config/p
   psql "host=$RDS dbname=point user=app_rw sslmode=disable" -c 'select 1'          # no pg_hba.conf entry ... no encryption
 
 kubectl run -it --rm rc --image=redis:7-alpine -- redis-cli -h $REDIS ping          # PONG
-kubectl -n kafka get kafka point                                                     # READY True
-kubectl -n kafka get kafkatopic
+kubectl run -it --rm rc2 --image=redis:7-alpine -- redis-cli -h $REDIS info replication | grep -E '^(role|connected_slaves):'   # role:master, connected_slaves:1
+aws elasticache describe-replication-groups --replication-group-id point-dev-redis \
+  --query 'ReplicationGroups[0].[Engine,AutomaticFailover,MultiAZ]' --output text   # valkey enabled enabled  ⚠️ 확인: Engine 필드 출력
+# 원장 반영 Stream (9단계 데모 뒤) — group point-ledger 의 pending·lag 0
+kubectl run -it --rm rs --image=redis:7-alpine -- sh -c "for s in \$(redis-cli -h $REDIS smembers reward:streams); do echo \$s; redis-cli -h $REDIS xinfo groups \$s; done; echo dlq=\$(redis-cli -h $REDIS xlen reward:dlq)"
 ```
+- Kafka(`kubectl -n kafka get kafka point`)는 11-26 제거 — 대신 위 Stream 확인.
 - `app_rw` 생성·권한은 db-init PreSync Job 이 한다: `kubectl -n point logs job/db-init` → `DO / GRANT / GRANT`.
 
 ## 8단계 — External Secrets
 ```bash
 kubectl get clustersecretstore aws-sm                       # Valid / True
 kubectl -n point get externalsecret                         # SecretSynced / True
-kubectl -n point get secret monolith-db -o json | jq -r '.data|keys[]'
+kubectl -n point get secret core-service-db -o json | jq -r '.data|keys[]'     # DB_PASSWORD DB_URL DB_USERNAME JWT_PRIVATE_KEY
+kubectl -n point get secret event-secrets   -o json | jq -r '.data|keys[]'     # ADMIN_API_TOKEN JWT_PUBLIC_KEY
 # JWT 개인키 ↔ 공개키가 같은 쌍인지 (값은 출력하지 않음)
-diff <(kubectl -n point get secret monolith-db   -o jsonpath='{.data.JWT_PRIVATE_KEY}' | base64 -d | openssl pkey -pubout) \
+diff <(kubectl -n point get secret core-service-db -o jsonpath='{.data.JWT_PRIVATE_KEY}' | base64 -d | openssl pkey -pubout) \
      <(kubectl -n point get secret event-secrets -o jsonpath='{.data.JWT_PUBLIC_KEY}'  | base64 -d) && echo "keypair OK"
 ```
 - `db-master` 는 PreSync hook 이라 Sync 때마다 다시 만들어진다 (앱 파드는 참조하지 않음).
@@ -114,7 +122,7 @@ diff <(kubectl -n point get secret monolith-db   -o jsonpath='{.data.JWT_PRIVATE
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/                          # 200 (web)
 curl -s http://$ALB/api/events/evt-local/status | jq -c .data                  # event-service
-curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/api/points/balance        # 401 (monolith, 토큰 없음)
+curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/api/points/balance        # 401 (core-service, 토큰 없음)
 curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/actuator/health           # 200 이 아니어야 함 (비노출)
 for tg in $(aws elbv2 describe-target-groups --query "TargetGroups[?contains(TargetGroupName,'point')].TargetGroupArn" --output text); do
   aws elbv2 describe-target-health --target-group-arn $tg --query 'TargetHealthDescriptions[].TargetHealth.State' --output text; done
@@ -132,15 +140,28 @@ TOKEN=$(login demo1@point.local)
 curl -s http://$ALB/api/points/balance -H "Authorization: Bearer $TOKEN" | jq -c .data    # 1000
 answer $TOKEN; answer $TOKEN                                     # 202, 409
 for u in 2 3 4; do answer $(login demo$u@point.local); done      # 202 202 200(재고 소진)
-sleep 2   # Kafka → monolith → 원장 (보통 1초 안쪽)
+sleep 2   # Redis Stream → core-service → 원장 (보통 1초 안쪽)
 curl -s http://$ALB/api/points/balance -H "Authorization: Bearer $TOKEN" | jq -c .data    # 1500 (자동 반영)
-kubectl logs -n point -l app=monolith --since=5m | grep 'reward applied'                  # reason=QUIZ_REWARD ×3
+kubectl logs -n point -l app=core-service --since=5m | grep 'reward applied'              # reason=QUIZ_REWARD ×3
 curl -s http://$ALB/api/points/history -H "Authorization: Bearer $TOKEN" | jq -c '[.data[]|select(.referenceId=="evt-local")]|length'   # 1 (중복 지급 없음)
 curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/api/admin/events/evt-local/settlement  # 404 (정산 API 제거됨 — /api/admin/** 는 공개 경로로 남아 있음)
 ```
-- ⚠️ `evt-local` 은 한 번 쓰면 재고가 소진된다. 다시 하려면 `kubectl -n point rollout restart deploy/monolith deploy/event-service`.
+
+### 운영용 이벤트 생성 API (event-day 런북 방식)
+```bash
+ADM=$(aws secretsmanager get-secret-value --secret-id point-dev/event-service --query SecretString --output text | jq -r .ADMIN_API_TOKEN)
+EV=evt-manual-$(date +%m%d%H%M); ENDS=$(date -u -d '+30 min' +%Y-%m-%dT%H:%M:%SZ)
+create() { curl -s -o /dev/null -w '%{http_code}\n' -X POST http://$ALB/api/events/admin/$EV -H "X-Admin-Token: $1" \
+  -H 'Content-Type: application/json' -d "{\"stock\":2,\"amount\":100,\"endsAt\":\"$ENDS\"}"; }
+create wrong          # 403
+create "$ADM"         # 201
+create "$ADM"         # 409 (한 번 쓴 id 는 재사용 불가)
+curl -s http://$ALB/api/events/$EV/status | jq -c .data      # open true, endsAt = 30분 뒤 (UTC)
+```
+- 통과: 403 → 201 → 409. 마감(`endsAt`) 뒤 참여하면 410.
+- ⚠️ `evt-local` 은 한 번 쓰면 재고가 소진된다. 다시 하려면 `curl -X POST "http://$ALB/api/events/evt-local/open?stock=3&amount=500"` (local 전용 초기화) — 단, 같은 사용자의 재당첨은 멱등키가 같아 원장에 다시 들어가지 않는다. 새 확인은 위 생성 API 로 새 id.
 - 브라우저에서도 `http://$ALB` 로 로그인 → 퀴즈 당첨("500P가 곧 적립돼요") → 잠시 뒤 잔액 1,500P.
-- 퀴즈 당첨은 **즉시 지급**이다 (point-infra ADR-0018, monolith·web `v0.1.2`). 일괄 정산(ADR-0017)은 철회됐다.
+- 퀴즈 당첨은 **즉시 지급**이다 (point-infra ADR-0018). 일괄 정산(ADR-0017)은 철회됐다. 원장 반영 경로는 Redis Stream (ADR-0019).
 
 ## 10단계 — Karpenter + KEDA
 ```bash
@@ -208,4 +229,4 @@ aws ec2 describe-instances --filters Name=instance-state-name,Values=running --q
 # 3) 인프라
 terraform -chdir=envs/dev destroy
 ```
-- Secrets Manager 비밀 2개(`point-dev/monolith`, `point-dev/event-service`)는 Terraform 밖이다 → 필요하면 `aws secretsmanager delete-secret --force-delete-without-recovery`.
+- Secrets Manager 비밀 2개(`point-dev/core-service`, `point-dev/event-service`)는 Terraform 밖이다 → 필요하면 `aws secretsmanager delete-secret --force-delete-without-recovery`.

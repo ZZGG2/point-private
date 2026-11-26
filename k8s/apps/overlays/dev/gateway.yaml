@@ -8,9 +8,9 @@ spec:
 ---
 apiVersion: gateway.k8s.aws/v1
 kind: TargetGroupConfiguration
-metadata: { name: monolith-tg }
+metadata: { name: core-service-tg }
 spec:
-  targetReference: { name: monolith }
+  targetReference: { name: core-service }
   defaultConfiguration:
     targetType: ip
     healthCheckConfig: { healthCheckPath: /actuator/health/readiness }
@@ -52,6 +52,6 @@ spec:
     - matches: [{ path: { type: PathPrefix, value: /api/events } }]
       backendRefs: [{ name: event-service, port: 80 }]
     - matches: [{ path: { type: PathPrefix, value: /api } }]
-      backendRefs: [{ name: monolith, port: 80 }]
+      backendRefs: [{ name: core-service, port: 80 }]
     - matches: [{ path: { type: PathPrefix, value: / } }]
       backendRefs: [{ name: web, port: 80 }]

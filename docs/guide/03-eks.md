@@ -96,7 +96,7 @@ module "eks" {
 | `vpc-cni` + `ENABLE_PREFIX_DELEGATION` | ENI 슬롯마다 IP 1개가 아니라 /28(16개) 블록 → 노드당 파드 수 증가 |
 | `before_compute = true` | 노드그룹보다 애드온을 먼저 설치. 노드가 뜬 뒤 바꾸면 기존 노드엔 반영 안 됨 |
 | `eks-pod-identity-agent` | 5단계 이후 Pod Identity(파드 → IAM 역할)에 필요 |
-| `eks_managed_node_groups.core` | On-Demand t3.medium 2대. monolith 등 상시 워크로드용. 이벤트 피크는 10단계 Karpenter |
+| `eks_managed_node_groups.core` | On-Demand t3.medium 2대. core-service 등 상시 워크로드용. 이벤트 피크는 10단계 Karpenter |
 
 ## 3-3. `modules/eks/outputs.tf`
 ```hcl
